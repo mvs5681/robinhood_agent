@@ -4,7 +4,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class FlowAlert(BaseModel):
@@ -116,6 +116,38 @@ class OptionContract(BaseModel):
         if self.mid == 0:
             return Decimal("999")
         return (self.ask - self.bid) / self.mid
+
+
+class InterpolatedIVEntry(BaseModel):
+    """
+    One row from /stock/{ticker}/interpolated-iv.
+    Each row represents a DTE horizon (1, 5, 7, 14, 30 days).
+    percentile is 0-100 (higher = more expensive relative to 1-year history).
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    days: int
+    volatility: Decimal
+    percentile: Decimal  # 0-100
+    implied_move_perc: Decimal | None = None
+    trade_date: date | None = Field(default=None, alias="date")
+
+
+class TechnicalPoint(BaseModel):
+    """
+    One data point from /stock/{ticker}/technical-indicator/{function}.
+    Field names vary by indicator; optional fields cover RSI, MACD, BBANDS.
+    """
+
+    timestamp: str  # kept as string — format varies (date vs datetime)
+    value: Decimal | None = None       # RSI, SMA, EMA and other single-value indicators
+    macd: Decimal | None = None        # MACD line
+    signal: Decimal | None = None      # MACD signal line
+    histogram: Decimal | None = None   # MACD histogram
+    upper_band: Decimal | None = None  # BBANDS
+    middle_band: Decimal | None = None
+    lower_band: Decimal | None = None
 
 
 class QuotaStatus(BaseModel):

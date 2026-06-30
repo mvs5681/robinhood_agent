@@ -39,3 +39,18 @@ def market_tide_raw() -> dict:
 @pytest.fixture
 def darkpool_raw() -> dict:
     return json.loads((FIXTURES_DIR / "darkpool.json").read_text())
+
+
+@pytest.fixture
+def interpolated_iv_raw() -> dict:
+    return json.loads((FIXTURES_DIR / "interpolated_iv.json").read_text())
+
+
+@pytest.fixture
+def technical_rsi_raw() -> dict:
+    return json.loads((FIXTURES_DIR / "technical_rsi.json").read_text())
+
+
+@pytest.fixture
+def technical_macd_raw() -> dict:
+    return json.loads((FIXTURES_DIR / "technical_macd.json").read_text())

@@ -14,13 +14,16 @@ from langgraph.graph.message import add_messages
 from pydantic import BaseModel, ConfigDict
 
 from trader.gex.schemas import GEXSetup
+from trader.scoring.schemas import CandidateSignal
 from trader.uw.schemas import (
     DarkpoolPrint,
     FlowAlert,
+    InterpolatedIVEntry,
     MarketTide,
     NetPremTick,
     OptionContract,
     SpotGEXByStrike,
+    TechnicalPoint,
 )
 
 
@@ -44,8 +47,12 @@ class TradingAgentState(BaseModel):
     # Phase 2: GEX setups keyed by ticker
     gex_setups: dict[str, GEXSetup] = {}
 
-    # Pipeline artefacts (populated by later phases)
-    candidates: list[Any] = []   # list[CandidateSignal] — typed in Phase 3
+    # Phase 3: IV and technical data (ticker → data)
+    interpolated_iv: dict[str, list[InterpolatedIVEntry]] = {}
+    technicals: dict[str, dict[str, list[TechnicalPoint]]] = {}
+
+    # Pipeline artefacts
+    candidates: list[CandidateSignal] = []
     errors: list[str] = []
 
     # LangGraph message log (tool call history for ToolNode)

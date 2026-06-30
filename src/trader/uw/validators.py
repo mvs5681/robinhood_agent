@@ -14,10 +14,12 @@ from pydantic import ValidationError
 from .schemas import (
     DarkpoolPrint,
     FlowAlert,
+    InterpolatedIVEntry,
     MarketTide,
     NetPremTick,
     OptionContract,
     SpotGEXByStrike,
+    TechnicalPoint,
 )
 
 
@@ -105,3 +107,56 @@ def parse_option_contracts(raw: Any) -> list[OptionContract]:
         except ValidationError as e:
             raise UWValidationError(f"OptionContract[{i}] validation failed: {e}") from e
     return result
+
+
+def parse_interpolated_iv(raw: Any) -> list[InterpolatedIVEntry]:
+    items = _unwrap(raw)
+    result = []
+    for i, item in enumerate(items):
+        try:
+            result.append(InterpolatedIVEntry.model_validate(item))
+        except ValidationError as e:
+            raise UWValidationError(f"InterpolatedIVEntry[{i}] validation failed: {e}") from e
+    return result
+
+
+def parse_technical_indicator(raw: Any, function: str) -> list[TechnicalPoint]:
+    """
+    Parse technical indicator response.
+    The UW API returns Alpha Vantage-style data with function-specific field names.
+    We normalise MACD fields and map single-value indicators to `.value`.
+    """
+    items = _unwrap(raw)
+    result = []
+    for i, item in enumerate(items):
+        try:
+            normalised = _normalise_technical(item, function)
+            result.append(TechnicalPoint.model_validate(normalised))
+        except (ValidationError, KeyError) as e:
+            raise UWValidationError(
+                f"TechnicalPoint[{i}] ({function}) validation failed: {e}"
+            ) from e
+    return result
+
+
+def _normalise_technical(item: dict, function: str) -> dict:
+    """Map function-specific field names onto the unified TechnicalPoint fields."""
+    out: dict = {"timestamp": item.get("timestamp", item.get("date", ""))}
+    fn = function.upper()
+
+    if fn == "MACD":
+        out["macd"] = item.get("MACD") or item.get("macd")
+        out["signal"] = item.get("MACD_Signal") or item.get("signal")
+        out["histogram"] = item.get("MACD_Hist") or item.get("histogram")
+    elif fn == "BBANDS":
+        out["upper_band"] = item.get("Real Upper Band") or item.get("upper_band")
+        out["middle_band"] = item.get("Real Middle Band") or item.get("middle_band")
+        out["lower_band"] = item.get("Real Lower Band") or item.get("lower_band")
+    else:
+        # Single-value indicators: RSI, SMA, EMA, etc.
+        out["value"] = (
+            item.get(fn)
+            or item.get(fn.lower())
+            or item.get("value")
+        )
+    return out

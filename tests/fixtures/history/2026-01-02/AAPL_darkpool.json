@@ -1,0 +1,13 @@
+{
+  "data": [
+    {
+      "ticker": "AAPL",
+      "price": "195.50",
+      "size": 12000,
+      "premium": "2346000.00",
+      "executed_at": "2026-01-02T13:30:00Z",
+      "market_center": "D",
+      "canceled": false
+    }
+  ]
+}

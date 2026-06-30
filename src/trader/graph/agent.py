@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timezone
 from decimal import Decimal
 from typing import Any
 
@@ -383,8 +383,13 @@ def check_flow(
     """
     Phase 4 node: confirm each proposed candidate against live flow alerts.
     Candidates without a matching whale print become skipped_no_flow.
+    pipeline_date is used as the as_of anchor when set (backtest replay).
     """
-    as_of = datetime.now(timezone.utc)
+    if state.pipeline_date is not None:
+        # Set as_of to market close of the historical date so intraday alerts are included
+        as_of = datetime.combine(state.pipeline_date, time(16, 0), tzinfo=timezone.utc)
+    else:
+        as_of = datetime.now(timezone.utc)
     confirmed = [trigger.check(c, state.flow_alerts, as_of=as_of) for c in state.candidates]
     for c in confirmed:
         logger.info(
@@ -512,8 +517,13 @@ async def run_pipeline(
     account_number: str = "",
     rh_tools: list[BaseTool] | None = None,
     order_quantity: int = 1,
+    pipeline_date: date | None = None,
 ) -> TradingAgentState:
-    """Run the full graph for a given ticker list and return final state."""
+    """Run the full graph for a given ticker list and return final state.
+
+    pipeline_date: when set, the flow-trigger gate uses this date (at 16:00 UTC) as
+    the as_of anchor instead of datetime.now(). Required for deterministic backtest replay.
+    """
     graph = build_graph(
         tools,
         detector_params,
@@ -529,6 +539,6 @@ async def run_pipeline(
         rh_tools=rh_tools,
         order_quantity=order_quantity,
     )
-    initial = TradingAgentState(tickers=tickers)
+    initial = TradingAgentState(tickers=tickers, pipeline_date=pipeline_date)
     result = await graph.ainvoke(initial)
     return TradingAgentState.model_validate(result)

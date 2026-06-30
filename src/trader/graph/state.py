@@ -8,6 +8,7 @@ LangGraph manages state checkpointing and conditional routing.
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Annotated, Any
 
 from langgraph.graph.message import add_messages
@@ -56,6 +57,9 @@ class TradingAgentState(BaseModel):
     candidates: list[CandidateSignal] = []
     order_results: list[OrderResult] = []
     errors: list[str] = []
+
+    # Optional historical date for backtest replay (overrides datetime.now in flow gate)
+    pipeline_date: date | None = None
 
     # LangGraph message log (tool call history for ToolNode)
     messages: Annotated[list[Any], add_messages] = []

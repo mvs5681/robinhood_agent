@@ -1,0 +1,7 @@
+{
+  "data": [
+    {"timestamp": "2026-01-02T14:30:00Z", "net_call_premium": "2500000.00", "net_put_premium": "-800000.00", "net_volume": 45000},
+    {"timestamp": "2026-01-02T14:31:00Z", "net_call_premium": "3200000.00", "net_put_premium": "-950000.00", "net_volume": 58000},
+    {"timestamp": "2026-01-02T14:32:00Z", "net_call_premium": "4100000.00", "net_put_premium": "-1100000.00", "net_volume": 72000}
+  ]
+}

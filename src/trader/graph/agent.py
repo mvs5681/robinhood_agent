@@ -24,6 +24,7 @@ from langchain_core.tools import BaseTool
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
 
+from trader.contracts.selector import ContractSelector, SelectorParams
 from trader.flow.trigger import FlowTrigger
 from trader.gex.detector import GEXDetector
 from trader.gex.schemas import GEXDetectorParams, GEXSetup
@@ -34,6 +35,7 @@ from trader.uw.validators import (
     parse_interpolated_iv,
     parse_market_tide,
     parse_net_prem_ticks,
+    parse_option_contracts,
     parse_spot_gex_by_strike,
     parse_technical_indicator,
 )
@@ -89,6 +91,7 @@ async def fetch_ticker_data(
     spot_gex: dict = dict(state.spot_gex)
     darkpool: dict = dict(state.darkpool)
     net_prem_ticks: dict = dict(state.net_prem_ticks)
+    option_contracts: dict = dict(state.option_contracts)
     interpolated_iv: dict = dict(state.interpolated_iv)
     technicals: dict = dict(state.technicals)
     errors: list[str] = list(state.errors)
@@ -119,6 +122,14 @@ async def fetch_ticker_data(
             errors.append(f"{ticker}.net_prem_ticks: {exc}")
 
         try:
+            raw_contracts = await tools["get_option_contracts"].ainvoke({"ticker": ticker})
+            option_contracts[ticker] = parse_option_contracts(raw_contracts)
+            logger.info("%s option_contracts: %d contracts", ticker, len(option_contracts[ticker]))
+        except Exception as exc:
+            logger.error("%s option_contracts failed: %s", ticker, exc)
+            errors.append(f"{ticker}.option_contracts: {exc}")
+
+        try:
             raw_iv = await tools["get_interpolated_iv"].ainvoke({"ticker": ticker})
             interpolated_iv[ticker] = parse_interpolated_iv(raw_iv)
             logger.info("%s interpolated_iv: %d entries", ticker, len(interpolated_iv[ticker]))
@@ -145,6 +156,7 @@ async def fetch_ticker_data(
         "spot_gex": spot_gex,
         "darkpool": darkpool,
         "net_prem_ticks": net_prem_ticks,
+        "option_contracts": option_contracts,
         "interpolated_iv": interpolated_iv,
         "technicals": technicals,
         "errors": errors,
@@ -244,6 +256,29 @@ def score_candidates(
     return {"candidates": ranked}
 
 
+def select_contracts(
+    state: TradingAgentState,
+    selector: ContractSelector,
+) -> dict[str, Any]:
+    """
+    Phase 5 node: pick the best OptionContract for each flow-confirmed candidate.
+    Non-proposed candidates pass through. Candidates with no eligible contract
+    become not_executable_long_only.
+    """
+    updated = []
+    for candidate in state.candidates:
+        contracts = state.option_contracts.get(candidate.ticker, [])
+        result = selector.select(candidate, contracts)
+        updated.append(result)
+        logger.info(
+            "%s: contract=%s status=%s",
+            candidate.ticker,
+            result.selected_contract.strike if result.selected_contract else None,
+            result.execution_status,
+        )
+    return {"candidates": updated}
+
+
 def check_flow(
     state: TradingAgentState,
     trigger: FlowTrigger,
@@ -270,18 +305,20 @@ def build_graph(
     blend_weights: dict[str, float] | None = None,
     flow_min_premium: Decimal = Decimal("100_000"),
     flow_lookback_hours: int = 4,
+    selector_params: SelectorParams | None = None,
 ) -> Any:
     """
     Construct and compile the LangGraph StateGraph.
 
-    Pipeline (Phases 1–4):
+    Pipeline (Phases 1–5):
       START → fetch_market_data → fetch_ticker_data → detect_gex
-           → score_candidates → check_flow → END
+           → score_candidates → check_flow → select_contracts → END
     """
     tool_map = {t.name: t for t in tools}
     detector = GEXDetector(detector_params)
     scorer = BlendScorer(blend_weights)
     trigger = FlowTrigger(min_premium=flow_min_premium, lookback_hours=flow_lookback_hours)
+    selector = ContractSelector(selector_params)
 
     async def _fetch_market(state: TradingAgentState) -> dict[str, Any]:
         return await fetch_market_data(state, tool_map)
@@ -298,6 +335,9 @@ def build_graph(
     def _check_flow(state: TradingAgentState) -> dict[str, Any]:
         return check_flow(state, trigger)
 
+    def _select_contracts(state: TradingAgentState) -> dict[str, Any]:
+        return select_contracts(state, selector)
+
     builder: StateGraph = StateGraph(TradingAgentState)
 
     builder.add_node("fetch_market_data", _fetch_market)
@@ -305,19 +345,21 @@ def build_graph(
     builder.add_node("detect_gex", _detect_gex)
     builder.add_node("score_candidates", _score_candidates)
     builder.add_node("check_flow", _check_flow)
+    builder.add_node("select_contracts", _select_contracts)
 
     try:
         builder.add_node("tools", ToolNode(tools))
     except Exception:
         pass
 
-    # Phase 1 → 2 → 3 → 4 pipeline
+    # Phase 1 → 2 → 3 → 4 → 5 pipeline
     builder.add_edge(START, "fetch_market_data")
     builder.add_edge("fetch_market_data", "fetch_ticker_data")
     builder.add_edge("fetch_ticker_data", "detect_gex")
     builder.add_edge("detect_gex", "score_candidates")
     builder.add_edge("score_candidates", "check_flow")
-    builder.add_edge("check_flow", END)
+    builder.add_edge("check_flow", "select_contracts")
+    builder.add_edge("select_contracts", END)
 
     return builder.compile()
 
@@ -334,6 +376,7 @@ async def run_pipeline(
     blend_weights: dict[str, float] | None = None,
     flow_min_premium: Decimal = Decimal("100_000"),
     flow_lookback_hours: int = 4,
+    selector_params: SelectorParams | None = None,
 ) -> TradingAgentState:
     """Run the full graph for a given ticker list and return final state."""
     graph = build_graph(
@@ -342,6 +385,7 @@ async def run_pipeline(
         blend_weights,
         flow_min_premium=flow_min_premium,
         flow_lookback_hours=flow_lookback_hours,
+        selector_params=selector_params,
     )
     initial = TradingAgentState(tickers=tickers)
     result = await graph.ainvoke(initial)

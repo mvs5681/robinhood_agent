@@ -1,0 +1,39 @@
+{
+  "data": [
+    {
+      "ticker": "AAPL", "expiry": "2026-07-25", "strike": "200.0", "type": "call",
+      "bid": "2.90", "ask": "3.10", "open_interest": 9000, "volume": 4500,
+      "implied_volatility": "0.285", "delta": "0.35", "gamma": "0.042", "theta": "-0.065", "vega": "0.18"
+    },
+    {
+      "ticker": "AAPL", "expiry": "2026-07-25", "strike": "197.5", "type": "call",
+      "bid": "3.60", "ask": "3.80", "open_interest": 7500, "volume": 3200,
+      "implied_volatility": "0.290", "delta": "0.40", "gamma": "0.045", "theta": "-0.070", "vega": "0.19"
+    },
+    {
+      "ticker": "AAPL", "expiry": "2026-07-25", "strike": "195.0", "type": "call",
+      "bid": "4.50", "ask": "4.80", "open_interest": 6000, "volume": 2800,
+      "implied_volatility": "0.295", "delta": "0.44", "gamma": "0.041", "theta": "-0.072", "vega": "0.17"
+    },
+    {
+      "ticker": "AAPL", "expiry": "2026-07-25", "strike": "205.0", "type": "call",
+      "bid": "1.80", "ask": "2.20", "open_interest": 3000, "volume": 900,
+      "implied_volatility": "0.275", "delta": "0.29", "gamma": "0.031", "theta": "-0.055", "vega": "0.14"
+    },
+    {
+      "ticker": "AAPL", "expiry": "2026-08-21", "strike": "200.0", "type": "call",
+      "bid": "5.10", "ask": "5.40", "open_interest": 11000, "volume": 5000,
+      "implied_volatility": "0.310", "delta": "0.38", "gamma": "0.033", "theta": "-0.045", "vega": "0.24"
+    },
+    {
+      "ticker": "AAPL", "expiry": "2026-07-08", "strike": "200.0", "type": "call",
+      "bid": "1.20", "ask": "1.50", "open_interest": 2500, "volume": 1200,
+      "implied_volatility": "0.260", "delta": "0.42", "gamma": "0.061", "theta": "-0.120", "vega": "0.09"
+    },
+    {
+      "ticker": "AAPL", "expiry": "2026-07-25", "strike": "190.0", "type": "put",
+      "bid": "3.30", "ask": "3.55", "open_interest": 8500, "volume": 3800,
+      "implied_volatility": "0.300", "delta": "-0.38", "gamma": "0.043", "theta": "-0.068", "vega": "0.18"
+    }
+  ]
+}

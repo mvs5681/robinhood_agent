@@ -13,6 +13,7 @@ from typing import Annotated, Any
 from langgraph.graph.message import add_messages
 from pydantic import BaseModel, ConfigDict
 
+from trader.executor.schemas import OrderResult
 from trader.gex.schemas import GEXSetup
 from trader.scoring.schemas import CandidateSignal
 from trader.uw.schemas import (
@@ -53,6 +54,7 @@ class TradingAgentState(BaseModel):
 
     # Pipeline artefacts
     candidates: list[CandidateSignal] = []
+    order_results: list[OrderResult] = []
     errors: list[str] = []
 
     # LangGraph message log (tool call history for ToolNode)

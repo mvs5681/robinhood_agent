@@ -25,6 +25,8 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
 
 from trader.contracts.selector import ContractSelector, SelectorParams
+from trader.executor.executor import Executor
+from trader.executor.schemas import ExecutionMode, OrderRequest, OrderResult
 from trader.flow.trigger import FlowTrigger
 from trader.gex.detector import GEXDetector
 from trader.gex.schemas import GEXDetectorParams, GEXSetup
@@ -281,6 +283,68 @@ def select_contracts(
     return {"candidates": updated}
 
 
+async def execute_orders(
+    state: TradingAgentState,
+    executor: Executor,
+) -> dict[str, Any]:
+    """
+    Phase 7 node: dispatch risk-approved candidates via the configured ExecutionMode.
+
+    Only candidates with execution_status='proposed' AND a selected_contract are sent
+    to the executor. All others pass through unchanged.
+
+    propose_only  — no orders placed; candidates stay 'proposed'
+    rh_approval   — graph interrupts per candidate for human confirmation
+    autonomous    — places immediately if review passes
+    """
+    updated: list = []
+    results: list[OrderResult] = []
+
+    for candidate in state.candidates:
+        if candidate.execution_status != "proposed" or candidate.selected_contract is None:
+            updated.append(candidate)
+            continue
+
+        try:
+            result = await executor.execute(candidate)
+            results.append(result)
+
+            if result.placed:
+                new_status = "executed"
+            elif executor.mode == ExecutionMode.PROPOSE_ONLY:
+                new_status = "proposed"
+            else:
+                new_status = "rejected_by_approval"
+
+            updated.append(candidate.model_copy(update={
+                "execution_status": new_status,
+                "skip_reason": result.rejection_reason,
+            }))
+            logger.info(
+                "%s: execute_orders placed=%s status=%s",
+                candidate.ticker,
+                result.placed,
+                new_status,
+            )
+        except Exception as exc:
+            logger.error("%s execute_orders failed: %s", candidate.ticker, exc)
+            results.append(OrderResult(
+                request=OrderRequest(
+                    candidate=candidate,
+                    action="buy_to_open",
+                    quantity=executor.quantity,
+                    limit_price=None,
+                    mode=executor.mode,
+                ),
+                placed=False,
+                rejection_reason=str(exc),
+                timestamp=datetime.now(timezone.utc),
+            ))
+            updated.append(candidate)
+
+    return {"candidates": updated, "order_results": results}
+
+
 def risk_gate(
     state: TradingAgentState,
     engine: RiskEngine,
@@ -342,20 +406,37 @@ def build_graph(
     risk_params: RiskParams | None = None,
     portfolio: PortfolioState | None = None,
     sector_map: dict[str, str] | None = None,
+    execution_mode: ExecutionMode = ExecutionMode.PROPOSE_ONLY,
+    account_number: str = "",
+    rh_tools: list[BaseTool] | None = None,
+    order_quantity: int = 1,
 ) -> Any:
     """
     Construct and compile the LangGraph StateGraph.
 
-    Pipeline (Phases 1–6):
+    Pipeline (Phases 1–7):
       START → fetch_market_data → fetch_ticker_data → detect_gex
-           → score_candidates → check_flow → select_contracts → risk_gate → END
+           → score_candidates → check_flow → select_contracts → risk_gate
+           → execute_orders → END
+
+    execution_mode defaults to PROPOSE_ONLY (no real orders).
+    rh_tools is the list of Robinhood MCP tools injected for non-propose modes;
+    only get_option_instruments, review_option_order, and place_option_order are used.
     """
     tool_map = {t.name: t for t in tools}
+    rh_tool_map = {t.name: t for t in (rh_tools or [])}
+
     detector = GEXDetector(detector_params)
     scorer = BlendScorer(blend_weights)
     trigger = FlowTrigger(min_premium=flow_min_premium, lookback_hours=flow_lookback_hours)
     selector = ContractSelector(selector_params)
     engine = RiskEngine(params=risk_params, portfolio=portfolio, sector_map=sector_map)
+    executor = Executor(
+        mode=execution_mode,
+        account_number=account_number,
+        rh_tools=rh_tool_map,
+        quantity=order_quantity,
+    )
 
     async def _fetch_market(state: TradingAgentState) -> dict[str, Any]:
         return await fetch_market_data(state, tool_map)
@@ -378,6 +459,9 @@ def build_graph(
     def _risk_gate(state: TradingAgentState) -> dict[str, Any]:
         return risk_gate(state, engine)
 
+    async def _execute_orders(state: TradingAgentState) -> dict[str, Any]:
+        return await execute_orders(state, executor)
+
     builder: StateGraph = StateGraph(TradingAgentState)
 
     builder.add_node("fetch_market_data", _fetch_market)
@@ -387,13 +471,14 @@ def build_graph(
     builder.add_node("check_flow", _check_flow)
     builder.add_node("select_contracts", _select_contracts)
     builder.add_node("risk_gate", _risk_gate)
+    builder.add_node("execute_orders", _execute_orders)
 
     try:
         builder.add_node("tools", ToolNode(tools))
     except Exception:
         pass
 
-    # Phase 1 → 2 → 3 → 4 → 5 → 6 pipeline
+    # Phase 1 → 2 → 3 → 4 → 5 → 6 → 7 pipeline
     builder.add_edge(START, "fetch_market_data")
     builder.add_edge("fetch_market_data", "fetch_ticker_data")
     builder.add_edge("fetch_ticker_data", "detect_gex")
@@ -401,7 +486,8 @@ def build_graph(
     builder.add_edge("score_candidates", "check_flow")
     builder.add_edge("check_flow", "select_contracts")
     builder.add_edge("select_contracts", "risk_gate")
-    builder.add_edge("risk_gate", END)
+    builder.add_edge("risk_gate", "execute_orders")
+    builder.add_edge("execute_orders", END)
 
     return builder.compile()
 
@@ -422,6 +508,10 @@ async def run_pipeline(
     risk_params: RiskParams | None = None,
     portfolio: PortfolioState | None = None,
     sector_map: dict[str, str] | None = None,
+    execution_mode: ExecutionMode = ExecutionMode.PROPOSE_ONLY,
+    account_number: str = "",
+    rh_tools: list[BaseTool] | None = None,
+    order_quantity: int = 1,
 ) -> TradingAgentState:
     """Run the full graph for a given ticker list and return final state."""
     graph = build_graph(
@@ -434,6 +524,10 @@ async def run_pipeline(
         risk_params=risk_params,
         portfolio=portfolio,
         sector_map=sector_map,
+        execution_mode=execution_mode,
+        account_number=account_number,
+        rh_tools=rh_tools,
+        order_quantity=order_quantity,
     )
     initial = TradingAgentState(tickers=tickers)
     result = await graph.ainvoke(initial)

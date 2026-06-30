@@ -13,6 +13,7 @@ from typing import Annotated, Any
 from langgraph.graph.message import add_messages
 from pydantic import BaseModel, ConfigDict
 
+from trader.gex.schemas import GEXSetup
 from trader.uw.schemas import (
     DarkpoolPrint,
     FlowAlert,
@@ -39,6 +40,9 @@ class TradingAgentState(BaseModel):
     darkpool: dict[str, list[DarkpoolPrint]] = {}
     net_prem_ticks: dict[str, list[NetPremTick]] = {}
     option_contracts: dict[str, list[OptionContract]] = {}
+
+    # Phase 2: GEX setups keyed by ticker
+    gex_setups: dict[str, GEXSetup] = {}
 
     # Pipeline artefacts (populated by later phases)
     candidates: list[Any] = []   # list[CandidateSignal] — typed in Phase 3

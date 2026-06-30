@@ -54,6 +54,15 @@ class TestBuildGraph:
         assert "AAPL" in state.darkpool
         assert len(state.darkpool["AAPL"]) == 2
 
+    async def test_pipeline_runs_gex_detection(self, mock_tool_list):
+        # AAPL spot price comes from flow_alerts fixture underlying_price=195.50
+        state = await run_pipeline(["AAPL"], mock_tool_list)
+        assert "AAPL" in state.gex_setups
+        setup = state.gex_setups["AAPL"]
+        from trader.gex.schemas import GEXRegime
+        assert setup.regime == GEXRegime.POSITIVE
+        assert setup.candidate_direction == "call"
+
     async def test_pipeline_multiple_tickers(self, mock_tool_list):
         state = await run_pipeline(["AAPL", "SPY"], mock_tool_list)
         assert "AAPL" in state.spot_gex

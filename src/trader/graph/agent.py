@@ -16,12 +16,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any
 
 from langchain_core.tools import BaseTool
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
 
+from trader.flow.trigger import FlowTrigger
 from trader.gex.detector import GEXDetector
 from trader.gex.schemas import GEXDetectorParams, GEXSetup
 from trader.scoring.scorer import BlendScorer, DEFAULT_WEIGHTS
@@ -241,23 +244,44 @@ def score_candidates(
     return {"candidates": ranked}
 
 
+def check_flow(
+    state: TradingAgentState,
+    trigger: FlowTrigger,
+) -> dict[str, Any]:
+    """
+    Phase 4 node: confirm each proposed candidate against live flow alerts.
+    Candidates without a matching whale print become skipped_no_flow.
+    """
+    as_of = datetime.now(timezone.utc)
+    confirmed = [trigger.check(c, state.flow_alerts, as_of=as_of) for c in state.candidates]
+    for c in confirmed:
+        logger.info(
+            "%s: flow_confirmed=%s status=%s",
+            c.ticker,
+            c.flow_confirmed,
+            c.execution_status,
+        )
+    return {"candidates": confirmed}
+
+
 def build_graph(
     tools: list[BaseTool],
     detector_params: GEXDetectorParams | None = None,
     blend_weights: dict[str, float] | None = None,
+    flow_min_premium: Decimal = Decimal("100_000"),
+    flow_lookback_hours: int = 4,
 ) -> Any:
     """
     Construct and compile the LangGraph StateGraph.
 
-    tools:           list of BaseTool from load_uw_tools() or MockUWTools adapter.
-    detector_params: optional overrides for GEXDetector thresholds.
-
-    Pipeline (Phase 1 + 2):
-      START → fetch_market_data → fetch_ticker_data → detect_gex → END
+    Pipeline (Phases 1–4):
+      START → fetch_market_data → fetch_ticker_data → detect_gex
+           → score_candidates → check_flow → END
     """
     tool_map = {t.name: t for t in tools}
     detector = GEXDetector(detector_params)
     scorer = BlendScorer(blend_weights)
+    trigger = FlowTrigger(min_premium=flow_min_premium, lookback_hours=flow_lookback_hours)
 
     async def _fetch_market(state: TradingAgentState) -> dict[str, Any]:
         return await fetch_market_data(state, tool_map)
@@ -271,24 +295,29 @@ def build_graph(
     def _score_candidates(state: TradingAgentState) -> dict[str, Any]:
         return score_candidates(state, scorer)
 
+    def _check_flow(state: TradingAgentState) -> dict[str, Any]:
+        return check_flow(state, trigger)
+
     builder: StateGraph = StateGraph(TradingAgentState)
 
     builder.add_node("fetch_market_data", _fetch_market)
     builder.add_node("fetch_ticker_data", _fetch_ticker)
     builder.add_node("detect_gex", _detect_gex)
     builder.add_node("score_candidates", _score_candidates)
+    builder.add_node("check_flow", _check_flow)
 
     try:
         builder.add_node("tools", ToolNode(tools))
     except Exception:
         pass
 
-    # Phase 1 → 2 → 3 pipeline
+    # Phase 1 → 2 → 3 → 4 pipeline
     builder.add_edge(START, "fetch_market_data")
     builder.add_edge("fetch_market_data", "fetch_ticker_data")
     builder.add_edge("fetch_ticker_data", "detect_gex")
     builder.add_edge("detect_gex", "score_candidates")
-    builder.add_edge("score_candidates", END)
+    builder.add_edge("score_candidates", "check_flow")
+    builder.add_edge("check_flow", END)
 
     return builder.compile()
 
@@ -303,9 +332,17 @@ async def run_pipeline(
     tools: list[BaseTool],
     detector_params: GEXDetectorParams | None = None,
     blend_weights: dict[str, float] | None = None,
+    flow_min_premium: Decimal = Decimal("100_000"),
+    flow_lookback_hours: int = 4,
 ) -> TradingAgentState:
     """Run the full graph for a given ticker list and return final state."""
-    graph = build_graph(tools, detector_params, blend_weights)
+    graph = build_graph(
+        tools,
+        detector_params,
+        blend_weights,
+        flow_min_premium=flow_min_premium,
+        flow_lookback_hours=flow_lookback_hours,
+    )
     initial = TradingAgentState(tickers=tickers)
     result = await graph.ainvoke(initial)
     return TradingAgentState.model_validate(result)

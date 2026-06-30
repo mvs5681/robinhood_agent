@@ -28,6 +28,8 @@ from trader.contracts.selector import ContractSelector, SelectorParams
 from trader.flow.trigger import FlowTrigger
 from trader.gex.detector import GEXDetector
 from trader.gex.schemas import GEXDetectorParams, GEXSetup
+from trader.risk.engine import RiskEngine
+from trader.risk.schemas import PortfolioState, RiskParams
 from trader.scoring.scorer import BlendScorer, DEFAULT_WEIGHTS
 from trader.uw.validators import (
     parse_darkpool_prints,
@@ -279,6 +281,37 @@ def select_contracts(
     return {"candidates": updated}
 
 
+def risk_gate(
+    state: TradingAgentState,
+    engine: RiskEngine,
+) -> dict[str, Any]:
+    """
+    Phase 6 node: apply hard risk gates to every proposed candidate.
+    Only candidates with a selected_contract are checked; others pass through.
+    Rejected candidates get execution_status="skipped_risk_gate".
+    """
+    updated = []
+    for candidate in state.candidates:
+        if candidate.execution_status != "proposed" or candidate.selected_contract is None:
+            updated.append(candidate)
+            continue
+
+        verdict = engine.check(candidate)
+        if verdict.approved:
+            updated.append(candidate)
+        else:
+            updated.append(candidate.model_copy(update={
+                "execution_status": "skipped_risk_gate",
+                "skip_reason": "; ".join(verdict.reasons),
+            }))
+        logger.info(
+            "%s: risk_gate approved=%s",
+            candidate.ticker,
+            verdict.approved,
+        )
+    return {"candidates": updated}
+
+
 def check_flow(
     state: TradingAgentState,
     trigger: FlowTrigger,
@@ -306,19 +339,23 @@ def build_graph(
     flow_min_premium: Decimal = Decimal("100_000"),
     flow_lookback_hours: int = 4,
     selector_params: SelectorParams | None = None,
+    risk_params: RiskParams | None = None,
+    portfolio: PortfolioState | None = None,
+    sector_map: dict[str, str] | None = None,
 ) -> Any:
     """
     Construct and compile the LangGraph StateGraph.
 
-    Pipeline (Phases 1–5):
+    Pipeline (Phases 1–6):
       START → fetch_market_data → fetch_ticker_data → detect_gex
-           → score_candidates → check_flow → select_contracts → END
+           → score_candidates → check_flow → select_contracts → risk_gate → END
     """
     tool_map = {t.name: t for t in tools}
     detector = GEXDetector(detector_params)
     scorer = BlendScorer(blend_weights)
     trigger = FlowTrigger(min_premium=flow_min_premium, lookback_hours=flow_lookback_hours)
     selector = ContractSelector(selector_params)
+    engine = RiskEngine(params=risk_params, portfolio=portfolio, sector_map=sector_map)
 
     async def _fetch_market(state: TradingAgentState) -> dict[str, Any]:
         return await fetch_market_data(state, tool_map)
@@ -338,6 +375,9 @@ def build_graph(
     def _select_contracts(state: TradingAgentState) -> dict[str, Any]:
         return select_contracts(state, selector)
 
+    def _risk_gate(state: TradingAgentState) -> dict[str, Any]:
+        return risk_gate(state, engine)
+
     builder: StateGraph = StateGraph(TradingAgentState)
 
     builder.add_node("fetch_market_data", _fetch_market)
@@ -346,20 +386,22 @@ def build_graph(
     builder.add_node("score_candidates", _score_candidates)
     builder.add_node("check_flow", _check_flow)
     builder.add_node("select_contracts", _select_contracts)
+    builder.add_node("risk_gate", _risk_gate)
 
     try:
         builder.add_node("tools", ToolNode(tools))
     except Exception:
         pass
 
-    # Phase 1 → 2 → 3 → 4 → 5 pipeline
+    # Phase 1 → 2 → 3 → 4 → 5 → 6 pipeline
     builder.add_edge(START, "fetch_market_data")
     builder.add_edge("fetch_market_data", "fetch_ticker_data")
     builder.add_edge("fetch_ticker_data", "detect_gex")
     builder.add_edge("detect_gex", "score_candidates")
     builder.add_edge("score_candidates", "check_flow")
     builder.add_edge("check_flow", "select_contracts")
-    builder.add_edge("select_contracts", END)
+    builder.add_edge("select_contracts", "risk_gate")
+    builder.add_edge("risk_gate", END)
 
     return builder.compile()
 
@@ -377,6 +419,9 @@ async def run_pipeline(
     flow_min_premium: Decimal = Decimal("100_000"),
     flow_lookback_hours: int = 4,
     selector_params: SelectorParams | None = None,
+    risk_params: RiskParams | None = None,
+    portfolio: PortfolioState | None = None,
+    sector_map: dict[str, str] | None = None,
 ) -> TradingAgentState:
     """Run the full graph for a given ticker list and return final state."""
     graph = build_graph(
@@ -386,6 +431,9 @@ async def run_pipeline(
         flow_min_premium=flow_min_premium,
         flow_lookback_hours=flow_lookback_hours,
         selector_params=selector_params,
+        risk_params=risk_params,
+        portfolio=portfolio,
+        sector_map=sector_map,
     )
     initial = TradingAgentState(tickers=tickers)
     result = await graph.ainvoke(initial)

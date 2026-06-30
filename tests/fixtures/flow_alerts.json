@@ -1,0 +1,36 @@
+{
+  "data": [
+    {
+      "ticker": "AAPL",
+      "expiry": "2026-07-18",
+      "strike": "200",
+      "type": "call",
+      "total_premium": "250000",
+      "total_size": 500,
+      "volume": 3200,
+      "open_interest": 12000,
+      "alert_rule": "RepeatedHits",
+      "trade_count": 18,
+      "underlying_price": "195.50",
+      "has_sweep": true,
+      "has_floor": false,
+      "created_at": "2026-06-30T14:30:00Z"
+    },
+    {
+      "ticker": "SPY",
+      "expiry": "2026-07-31",
+      "strike": "540",
+      "type": "put",
+      "total_premium": "180000",
+      "total_size": 300,
+      "volume": 8500,
+      "open_interest": 45000,
+      "alert_rule": "RepeatedHitsAscendingFill",
+      "trade_count": 12,
+      "underlying_price": "548.20",
+      "has_sweep": false,
+      "has_floor": true,
+      "created_at": "2026-06-30T13:45:00Z"
+    }
+  ]
+}

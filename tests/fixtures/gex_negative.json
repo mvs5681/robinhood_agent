@@ -1,0 +1,11 @@
+{
+  "data": [
+    {"price": "180", "call_gamma_oi": "100000000",   "put_gamma_oi": "-800000000",  "call_gamma_vol": "30000000",  "put_gamma_vol": "-200000000", "time": "2026-06-30T09:35:00Z"},
+    {"price": "185", "call_gamma_oi": "150000000",   "put_gamma_oi": "-2000000000", "call_gamma_vol": "40000000",  "put_gamma_vol": "-500000000", "time": "2026-06-30T09:35:00Z"},
+    {"price": "190", "call_gamma_oi": "200000000",   "put_gamma_oi": "-3500000000", "call_gamma_vol": "50000000",  "put_gamma_vol": "-800000000", "time": "2026-06-30T09:35:00Z"},
+    {"price": "195", "call_gamma_oi": "300000000",   "put_gamma_oi": "-1200000000", "call_gamma_vol": "80000000",  "put_gamma_vol": "-300000000", "time": "2026-06-30T09:35:00Z"},
+    {"price": "200", "call_gamma_oi": "500000000",   "put_gamma_oi": "-600000000",  "call_gamma_vol": "130000000", "put_gamma_vol": "-150000000", "time": "2026-06-30T09:35:00Z"},
+    {"price": "205", "call_gamma_oi": "800000000",   "put_gamma_oi": "-400000000",  "call_gamma_vol": "200000000", "put_gamma_vol": "-100000000", "time": "2026-06-30T09:35:00Z"},
+    {"price": "210", "call_gamma_oi": "1200000000",  "put_gamma_oi": "-200000000",  "call_gamma_vol": "300000000", "put_gamma_vol": "-50000000",  "time": "2026-06-30T09:35:00Z"}
+  ]
+}

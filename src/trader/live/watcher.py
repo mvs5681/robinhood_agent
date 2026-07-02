@@ -33,6 +33,7 @@ from trader.uw.validators import parse_flow_alerts
 
 from .cache import GEXCache
 from .market_hours import is_market_hours
+from .notifier import TelegramNotifier
 from .proposals import Proposal, ProposalStore
 
 if TYPE_CHECKING:
@@ -71,6 +72,7 @@ class FlowWatcher:
         sector_map: dict[str, str] | None = None,
         tel: TelemetryLogger | None = None,
         poll_interval: int = _POLL_INTERVAL,
+        notifier: TelegramNotifier | None = None,
     ) -> None:
         self.tickers = set(tickers)
         self.uw_tools = uw_tools
@@ -89,6 +91,7 @@ class FlowWatcher:
         self._engine = RiskEngine(
             params=risk_params, portfolio=PortfolioState(), sector_map=sector_map
         )
+        self._notifier = notifier
         self._seen: set[str] = set()   # dedup by (ticker, expiry, strike, type, created_at)
 
     async def run(self) -> None:
@@ -197,6 +200,8 @@ class FlowWatcher:
                     "PROPOSE_ONLY %s proposal_id=%s composite=%.3f",
                     ticker, proposal.proposal_id, candidate.blend_scores.composite,
                 )
+                if self._notifier:
+                    await self._notifier.notify_proposal(proposal)
 
             elif self.mode == ExecutionMode.RH_APPROVAL:
                 # Store for human approval via the HTTP server
@@ -205,6 +210,8 @@ class FlowWatcher:
                     "RH_APPROVAL %s proposal_id=%s — awaiting human approval",
                     ticker, proposal.proposal_id,
                 )
+                if self._notifier:
+                    await self._notifier.notify_proposal(proposal)
 
             elif self.mode == ExecutionMode.AUTONOMOUS:
                 try:

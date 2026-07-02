@@ -38,6 +38,7 @@ from trader.executor.executor import Executor
 from trader.executor.schemas import ExecutionMode
 from trader.live.approval_server import create_app
 from trader.live.cache import GEXCache
+from trader.live.notifier import TelegramNotifier
 from trader.live.proposals import ProposalStore
 from trader.live.scanner import GEXScanner
 from trader.live.telemetry_reader import TelemetryReader
@@ -77,6 +78,16 @@ async def main() -> None:
     )
     tel_reader = TelemetryReader(log_file=telemetry_log_file)
 
+    tg_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    tg_chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
+    public_url = os.environ.get("PUBLIC_URL", "")
+    notifier: TelegramNotifier | None = None
+    if tg_token and tg_chat_id:
+        notifier = TelegramNotifier(tg_token, tg_chat_id, public_url)
+        logger.info("Telegram notifications enabled (chat_id=%s)", tg_chat_id)
+    else:
+        logger.info("TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set — notifications disabled")
+
     # Load both MCP tool sets concurrently
     logger.info("Connecting to UW and RH MCP servers…")
     uw_tools_list, rh_tools_list = await asyncio.gather(
@@ -115,6 +126,7 @@ async def main() -> None:
         executor=executor,
         flow_min_premium=flow_min_premium,
         tel=tel,
+        notifier=notifier,
     )
 
     app = create_app(
@@ -129,11 +141,12 @@ async def main() -> None:
     await site.start()
     logger.info("Approval server listening on :%d", port)
 
+    coroutines = [scanner.run(), watcher.run()]
+    if notifier:
+        coroutines.append(notifier.run_poller(proposal_store, executor, tel))
+
     try:
-        await asyncio.gather(
-            scanner.run(),
-            watcher.run(),
-        )
+        await asyncio.gather(*coroutines)
     finally:
         await runner.cleanup()
         tel.close()

@@ -16,7 +16,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import date, datetime, time, timezone
+import time
+from datetime import date, datetime
+from datetime import time as dtime
+from datetime import timezone
 from decimal import Decimal
 from typing import Any
 
@@ -33,6 +36,7 @@ from trader.gex.schemas import GEXDetectorParams, GEXSetup
 from trader.risk.engine import RiskEngine
 from trader.risk.schemas import PortfolioState, RiskParams
 from trader.scoring.scorer import BlendScorer, DEFAULT_WEIGHTS
+from trader.telemetry.logger import TelemetryLogger
 from trader.uw.validators import (
     parse_darkpool_prints,
     parse_flow_alerts,
@@ -57,6 +61,7 @@ logger = logging.getLogger(__name__)
 async def fetch_market_data(
     state: TradingAgentState,
     tools: dict[str, BaseTool],
+    tel: TelemetryLogger | None = None,
 ) -> dict[str, Any]:
     """
     Fetch market-wide data: market tide and global flow alerts.
@@ -64,22 +69,38 @@ async def fetch_market_data(
     """
     updates: dict[str, Any] = {}
 
+    t0 = time.monotonic()
     try:
         raw_tide = await tools["get_market_tide"].ainvoke({})
         updates["market_tide"] = parse_market_tide(raw_tide)
-        logger.info("market_tide: %d ticks", len(updates["market_tide"]))
+        count = len(updates["market_tide"])
+        logger.info("market_tide: %d ticks", count)
+        if tel:
+            tel.uw_fetch(endpoint="get_market_tide", record_count=count,
+                         duration_ms=round((time.monotonic() - t0) * 1000, 1))
     except Exception as exc:
         logger.error("fetch_market_data market_tide failed: %s", exc)
         updates["errors"] = state.errors + [f"market_tide: {exc}"]
+        if tel:
+            tel.uw_fetch(endpoint="get_market_tide", record_count=0,
+                         duration_ms=round((time.monotonic() - t0) * 1000, 1), error=str(exc))
 
+    t0 = time.monotonic()
     try:
         raw_flow = await tools["get_flow_alerts"].ainvoke({"limit": 100})
         updates["flow_alerts"] = parse_flow_alerts(raw_flow)
-        logger.info("flow_alerts: %d alerts", len(updates["flow_alerts"]))
+        count = len(updates["flow_alerts"])
+        logger.info("flow_alerts: %d alerts", count)
+        if tel:
+            tel.uw_fetch(endpoint="get_flow_alerts", record_count=count,
+                         duration_ms=round((time.monotonic() - t0) * 1000, 1))
     except Exception as exc:
         logger.error("fetch_market_data flow_alerts failed: %s", exc)
         updates.setdefault("errors", state.errors)
         updates["errors"] = updates["errors"] + [f"flow_alerts: {exc}"]
+        if tel:
+            tel.uw_fetch(endpoint="get_flow_alerts", record_count=0,
+                         duration_ms=round((time.monotonic() - t0) * 1000, 1), error=str(exc))
 
     return updates
 
@@ -87,6 +108,7 @@ async def fetch_market_data(
 async def fetch_ticker_data(
     state: TradingAgentState,
     tools: dict[str, BaseTool],
+    tel: TelemetryLogger | None = None,
 ) -> dict[str, Any]:
     """
     Fetch per-ticker data in parallel: spot GEX, darkpool, net-prem ticks.
@@ -101,57 +123,52 @@ async def fetch_ticker_data(
     errors: list[str] = list(state.errors)
 
     async def _fetch_one(ticker: str) -> None:
-        try:
-            raw_gex = await tools["get_spot_exposures_by_strike"].ainvoke({"ticker": ticker})
-            spot_gex[ticker] = parse_spot_gex_by_strike(raw_gex)
-            logger.info("%s spot_gex: %d strikes", ticker, len(spot_gex[ticker]))
-        except Exception as exc:
-            logger.error("%s spot_gex failed: %s", ticker, exc)
-            errors.append(f"{ticker}.spot_gex: {exc}")
-
-        try:
-            raw_dp = await tools["get_darkpool_ticker"].ainvoke({"ticker": ticker})
-            darkpool[ticker] = parse_darkpool_prints(raw_dp)
-            logger.info("%s darkpool: %d prints", ticker, len(darkpool[ticker]))
-        except Exception as exc:
-            logger.error("%s darkpool failed: %s", ticker, exc)
-            errors.append(f"{ticker}.darkpool: {exc}")
-
-        try:
-            raw_ticks = await tools["get_net_prem_ticks"].ainvoke({"ticker": ticker})
-            net_prem_ticks[ticker] = parse_net_prem_ticks(raw_ticks)
-            logger.info("%s net_prem_ticks: %d ticks", ticker, len(net_prem_ticks[ticker]))
-        except Exception as exc:
-            logger.error("%s net_prem_ticks failed: %s", ticker, exc)
-            errors.append(f"{ticker}.net_prem_ticks: {exc}")
-
-        try:
-            raw_contracts = await tools["get_option_contracts"].ainvoke({"ticker": ticker})
-            option_contracts[ticker] = parse_option_contracts(raw_contracts)
-            logger.info("%s option_contracts: %d contracts", ticker, len(option_contracts[ticker]))
-        except Exception as exc:
-            logger.error("%s option_contracts failed: %s", ticker, exc)
-            errors.append(f"{ticker}.option_contracts: {exc}")
-
-        try:
-            raw_iv = await tools["get_interpolated_iv"].ainvoke({"ticker": ticker})
-            interpolated_iv[ticker] = parse_interpolated_iv(raw_iv)
-            logger.info("%s interpolated_iv: %d entries", ticker, len(interpolated_iv[ticker]))
-        except Exception as exc:
-            logger.error("%s interpolated_iv failed: %s", ticker, exc)
-            errors.append(f"{ticker}.interpolated_iv: {exc}")
+        for endpoint, invoke_kwargs, store, parser in [
+            ("get_spot_exposures_by_strike", {"ticker": ticker}, spot_gex, parse_spot_gex_by_strike),
+            ("get_darkpool_ticker",          {"ticker": ticker}, darkpool, parse_darkpool_prints),
+            ("get_net_prem_ticks",           {"ticker": ticker}, net_prem_ticks, parse_net_prem_ticks),
+            ("get_option_contracts",         {"ticker": ticker}, option_contracts, parse_option_contracts),
+            ("get_interpolated_iv",          {"ticker": ticker}, interpolated_iv, parse_interpolated_iv),
+        ]:
+            t0 = time.monotonic()
+            try:
+                raw = await tools[endpoint].ainvoke(invoke_kwargs)
+                store[ticker] = parser(raw)
+                count = len(store[ticker])
+                logger.info("%s %s: %d records", ticker, endpoint, count)
+                if tel:
+                    tel.uw_fetch(ticker=ticker, endpoint=endpoint, record_count=count,
+                                 duration_ms=round((time.monotonic() - t0) * 1000, 1))
+            except Exception as exc:
+                logger.error("%s %s failed: %s", ticker, endpoint, exc)
+                errors.append(f"{ticker}.{endpoint}: {exc}")
+                if tel:
+                    tel.uw_fetch(ticker=ticker, endpoint=endpoint, record_count=0,
+                                 duration_ms=round((time.monotonic() - t0) * 1000, 1),
+                                 error=str(exc))
 
         ticker_technicals: dict = {}
         for fn in ("RSI", "MACD"):
+            t0 = time.monotonic()
             try:
                 raw_tech = await tools["get_technical_indicator"].ainvoke(
                     {"ticker": ticker, "function": fn, "interval": "daily"}
                 )
                 ticker_technicals[fn] = parse_technical_indicator(raw_tech, fn)
-                logger.info("%s %s: %d points", ticker, fn, len(ticker_technicals[fn]))
+                count = len(ticker_technicals[fn])
+                logger.info("%s %s: %d points", ticker, fn, count)
+                if tel:
+                    tel.uw_fetch(ticker=ticker, endpoint=f"get_technical_indicator/{fn}",
+                                 record_count=count,
+                                 duration_ms=round((time.monotonic() - t0) * 1000, 1))
             except Exception as exc:
                 logger.error("%s %s failed: %s", ticker, fn, exc)
                 errors.append(f"{ticker}.{fn}: {exc}")
+                if tel:
+                    tel.uw_fetch(ticker=ticker, endpoint=f"get_technical_indicator/{fn}",
+                                 record_count=0,
+                                 duration_ms=round((time.monotonic() - t0) * 1000, 1),
+                                 error=str(exc))
         technicals[ticker] = ticker_technicals
 
     await asyncio.gather(*[_fetch_one(t) for t in state.tickers])
@@ -170,6 +187,7 @@ async def fetch_ticker_data(
 def detect_gex(
     state: TradingAgentState,
     detector: GEXDetector,
+    tel: TelemetryLogger | None = None,
 ) -> dict[str, Any]:
     """
     Phase 2 node: run GEXDetector over every ticker's spot_gex data.
@@ -179,7 +197,6 @@ def detect_gex(
       2. darkpool[ticker] most recent print price
       3. Skip ticker if neither is available
     """
-    # Build a spot price lookup from whatever data we already have
     spot_lookup: dict[str, Decimal] = {}
 
     for alert in state.flow_alerts:
@@ -195,15 +212,28 @@ def detect_gex(
     errors: list[str] = list(state.errors)
 
     for ticker in state.tickers:
+        t0 = time.monotonic()
         gex_data = state.spot_gex.get(ticker, [])
         if not gex_data:
             logger.warning("%s: no GEX data, skipping detector", ticker)
+            if tel:
+                tel.gex_setup(ticker=ticker, regime="unknown", direction="none",
+                               setup_type="none", confidence=0.0, flip_point=None,
+                               target_level=None,
+                               duration_ms=round((time.monotonic() - t0) * 1000, 1),
+                               skipped=True, reason="no GEX data")
             continue
 
         spot = spot_lookup.get(ticker)
         if spot is None:
             logger.warning("%s: no spot price available, skipping detector", ticker)
             errors.append(f"{ticker}.detect_gex: no spot price")
+            if tel:
+                tel.gex_setup(ticker=ticker, regime="unknown", direction="none",
+                               setup_type="none", confidence=0.0, flip_point=None,
+                               target_level=None,
+                               duration_ms=round((time.monotonic() - t0) * 1000, 1),
+                               skipped=True, reason="no spot price")
             continue
 
         try:
@@ -211,14 +241,28 @@ def detect_gex(
             gex_setups[ticker] = setup
             logger.info(
                 "%s: regime=%s confidence=%.2f direction=%s",
-                ticker,
-                setup.regime,
-                setup.structure_confidence,
-                setup.candidate_direction,
+                ticker, setup.regime, setup.structure_confidence, setup.candidate_direction,
             )
+            if tel:
+                tel.gex_setup(
+                    ticker=ticker,
+                    regime=setup.regime.value,
+                    direction=setup.candidate_direction,
+                    setup_type=setup.setup_type,
+                    confidence=setup.structure_confidence,
+                    flip_point=float(setup.flip_point) if setup.flip_point else None,
+                    target_level=float(setup.target_level) if setup.target_level else None,
+                    duration_ms=round((time.monotonic() - t0) * 1000, 1),
+                )
         except Exception as exc:
             logger.error("%s detect_gex failed: %s", ticker, exc)
             errors.append(f"{ticker}.detect_gex: {exc}")
+            if tel:
+                tel.gex_setup(ticker=ticker, regime="unknown", direction="none",
+                               setup_type="none", confidence=0.0, flip_point=None,
+                               target_level=None,
+                               duration_ms=round((time.monotonic() - t0) * 1000, 1),
+                               skipped=True, reason=str(exc))
 
     return {"gex_setups": gex_setups, "errors": errors}
 
@@ -231,6 +275,7 @@ def detect_gex(
 def score_candidates(
     state: TradingAgentState,
     scorer: BlendScorer,
+    tel: TelemetryLogger | None = None,
 ) -> dict[str, Any]:
     """
     Phase 3 node: score every GEXSetup and rank the resulting CandidateSignals.
@@ -238,6 +283,7 @@ def score_candidates(
     """
     candidates = []
     for ticker, setup in state.gex_setups.items():
+        t0 = time.monotonic()
         candidate = scorer.score(
             setup=setup,
             market_tide=state.market_tide,
@@ -251,10 +297,21 @@ def score_candidates(
         candidates.append(candidate)
         logger.info(
             "%s: composite=%.3f status=%s",
-            ticker,
-            candidate.blend_scores.composite,
-            candidate.execution_status,
+            ticker, candidate.blend_scores.composite, candidate.execution_status,
         )
+        if tel:
+            s = candidate.blend_scores
+            tel.blend_score(
+                ticker=ticker,
+                composite=s.composite,
+                market_tide=s.market_tide,
+                darkpool=s.darkpool,
+                flow_pressure=s.flow_pressure,
+                iv_cost=s.iv_cost,
+                technicals=s.technicals,
+                rank=candidate.rank,
+                duration_ms=round((time.monotonic() - t0) * 1000, 1),
+            )
 
     ranked = scorer.rank(candidates)
     return {"candidates": ranked}
@@ -263,6 +320,7 @@ def score_candidates(
 def select_contracts(
     state: TradingAgentState,
     selector: ContractSelector,
+    tel: TelemetryLogger | None = None,
 ) -> dict[str, Any]:
     """
     Phase 5 node: pick the best OptionContract for each flow-confirmed candidate.
@@ -271,21 +329,43 @@ def select_contracts(
     """
     updated = []
     for candidate in state.candidates:
+        t0 = time.monotonic()
         contracts = state.option_contracts.get(candidate.ticker, [])
         result = selector.select(candidate, contracts)
         updated.append(result)
+        c = result.selected_contract
         logger.info(
             "%s: contract=%s status=%s",
             candidate.ticker,
-            result.selected_contract.strike if result.selected_contract else None,
+            c.strike if c else None,
             result.execution_status,
         )
+        if tel:
+            from datetime import date as _date
+            spread_pct = (
+                float((c.ask - c.bid) / c.ask) if c and c.ask else None
+            )
+            dte = (
+                (c.expiry - _date.today()).days if c else None
+            )
+            tel.contract_select(
+                ticker=candidate.ticker,
+                selected=c is not None,
+                strike=float(c.strike) if c else None,
+                expiry=c.expiry.isoformat() if c else None,
+                delta=float(c.delta) if c and c.delta else None,
+                dte=dte,
+                spread_pct=spread_pct,
+                duration_ms=round((time.monotonic() - t0) * 1000, 1),
+                reason=result.skip_reason if c is None else None,
+            )
     return {"candidates": updated}
 
 
 async def execute_orders(
     state: TradingAgentState,
     executor: Executor,
+    tel: TelemetryLogger | None = None,
 ) -> dict[str, Any]:
     """
     Phase 7 node: dispatch risk-approved candidates via the configured ExecutionMode.
@@ -305,6 +385,7 @@ async def execute_orders(
             updated.append(candidate)
             continue
 
+        t0 = time.monotonic()
         try:
             result = await executor.execute(candidate)
             results.append(result)
@@ -322,10 +403,23 @@ async def execute_orders(
             }))
             logger.info(
                 "%s: execute_orders placed=%s status=%s",
-                candidate.ticker,
-                result.placed,
-                new_status,
+                candidate.ticker, result.placed, new_status,
             )
+            if tel:
+                lp = result.request.limit_price
+                tel.order_attempt(
+                    ticker=candidate.ticker,
+                    mode=executor.mode.value,
+                    action=result.request.action,
+                    quantity=result.request.quantity,
+                    limit_price=float(lp) if lp is not None else None,
+                    placed=result.placed,
+                    order_id=result.order_id,
+                    account_number=executor.account_number or None,
+                    rejection_reason=result.rejection_reason,
+                    review_summary=result.review_summary,
+                    duration_ms=round((time.monotonic() - t0) * 1000, 1),
+                )
         except Exception as exc:
             logger.error("%s execute_orders failed: %s", candidate.ticker, exc)
             results.append(OrderResult(
@@ -341,6 +435,20 @@ async def execute_orders(
                 timestamp=datetime.now(timezone.utc),
             ))
             updated.append(candidate)
+            if tel:
+                tel.order_attempt(
+                    ticker=candidate.ticker,
+                    mode=executor.mode.value,
+                    action="buy_to_open",
+                    quantity=executor.quantity,
+                    limit_price=None,
+                    placed=False,
+                    order_id=None,
+                    account_number=executor.account_number or None,
+                    rejection_reason=str(exc),
+                    review_summary=None,
+                    duration_ms=round((time.monotonic() - t0) * 1000, 1),
+                )
 
     return {"candidates": updated, "order_results": results}
 
@@ -348,6 +456,7 @@ async def execute_orders(
 def risk_gate(
     state: TradingAgentState,
     engine: RiskEngine,
+    tel: TelemetryLogger | None = None,
 ) -> dict[str, Any]:
     """
     Phase 6 node: apply hard risk gates to every proposed candidate.
@@ -360,6 +469,7 @@ def risk_gate(
             updated.append(candidate)
             continue
 
+        t0 = time.monotonic()
         verdict = engine.check(candidate)
         if verdict.approved:
             updated.append(candidate)
@@ -368,17 +478,21 @@ def risk_gate(
                 "execution_status": "skipped_risk_gate",
                 "skip_reason": "; ".join(verdict.reasons),
             }))
-        logger.info(
-            "%s: risk_gate approved=%s",
-            candidate.ticker,
-            verdict.approved,
-        )
+        logger.info("%s: risk_gate approved=%s", candidate.ticker, verdict.approved)
+        if tel:
+            tel.risk_check(
+                ticker=candidate.ticker,
+                approved=verdict.approved,
+                reasons=verdict.reasons,
+                duration_ms=round((time.monotonic() - t0) * 1000, 1),
+            )
     return {"candidates": updated}
 
 
 def check_flow(
     state: TradingAgentState,
     trigger: FlowTrigger,
+    tel: TelemetryLogger | None = None,
 ) -> dict[str, Any]:
     """
     Phase 4 node: confirm each proposed candidate against live flow alerts.
@@ -386,18 +500,25 @@ def check_flow(
     pipeline_date is used as the as_of anchor when set (backtest replay).
     """
     if state.pipeline_date is not None:
-        # Set as_of to market close of the historical date so intraday alerts are included
-        as_of = datetime.combine(state.pipeline_date, time(16, 0), tzinfo=timezone.utc)
+        as_of = datetime.combine(state.pipeline_date, dtime(16, 0), tzinfo=timezone.utc)
     else:
         as_of = datetime.now(timezone.utc)
-    confirmed = [trigger.check(c, state.flow_alerts, as_of=as_of) for c in state.candidates]
-    for c in confirmed:
-        logger.info(
-            "%s: flow_confirmed=%s status=%s",
-            c.ticker,
-            c.flow_confirmed,
-            c.execution_status,
-        )
+
+    confirmed = []
+    for c_in in state.candidates:
+        t0 = time.monotonic()
+        c = trigger.check(c_in, state.flow_alerts, as_of=as_of)
+        confirmed.append(c)
+        logger.info("%s: flow_confirmed=%s status=%s", c.ticker, c.flow_confirmed, c.execution_status)
+        if tel:
+            alert_premium = float(c.flow_trigger.total_premium) if c.flow_trigger else None
+            tel.flow_check(
+                ticker=c.ticker,
+                confirmed=c.flow_confirmed,
+                direction=c.gex_setup.candidate_direction,
+                alert_premium=alert_premium,
+                duration_ms=round((time.monotonic() - t0) * 1000, 1),
+            )
     return {"candidates": confirmed}
 
 
@@ -415,6 +536,7 @@ def build_graph(
     account_number: str = "",
     rh_tools: list[BaseTool] | None = None,
     order_quantity: int = 1,
+    telemetry: TelemetryLogger | None = None,
 ) -> Any:
     """
     Construct and compile the LangGraph StateGraph.
@@ -443,29 +565,31 @@ def build_graph(
         quantity=order_quantity,
     )
 
+    tel = telemetry
+
     async def _fetch_market(state: TradingAgentState) -> dict[str, Any]:
-        return await fetch_market_data(state, tool_map)
+        return await fetch_market_data(state, tool_map, tel)
 
     async def _fetch_ticker(state: TradingAgentState) -> dict[str, Any]:
-        return await fetch_ticker_data(state, tool_map)
+        return await fetch_ticker_data(state, tool_map, tel)
 
     def _detect_gex(state: TradingAgentState) -> dict[str, Any]:
-        return detect_gex(state, detector)
+        return detect_gex(state, detector, tel)
 
     def _score_candidates(state: TradingAgentState) -> dict[str, Any]:
-        return score_candidates(state, scorer)
+        return score_candidates(state, scorer, tel)
 
     def _check_flow(state: TradingAgentState) -> dict[str, Any]:
-        return check_flow(state, trigger)
+        return check_flow(state, trigger, tel)
 
     def _select_contracts(state: TradingAgentState) -> dict[str, Any]:
-        return select_contracts(state, selector)
+        return select_contracts(state, selector, tel)
 
     def _risk_gate(state: TradingAgentState) -> dict[str, Any]:
-        return risk_gate(state, engine)
+        return risk_gate(state, engine, tel)
 
     async def _execute_orders(state: TradingAgentState) -> dict[str, Any]:
-        return await execute_orders(state, executor)
+        return await execute_orders(state, executor, tel)
 
     builder: StateGraph = StateGraph(TradingAgentState)
 
@@ -518,11 +642,13 @@ async def run_pipeline(
     rh_tools: list[BaseTool] | None = None,
     order_quantity: int = 1,
     pipeline_date: date | None = None,
+    telemetry: TelemetryLogger | None = None,
 ) -> TradingAgentState:
     """Run the full graph for a given ticker list and return final state.
 
     pipeline_date: when set, the flow-trigger gate uses this date (at 16:00 UTC) as
     the as_of anchor instead of datetime.now(). Required for deterministic backtest replay.
+    telemetry: optional TelemetryLogger; if None, no structured events are emitted.
     """
     graph = build_graph(
         tools,
@@ -538,6 +664,7 @@ async def run_pipeline(
         account_number=account_number,
         rh_tools=rh_tools,
         order_quantity=order_quantity,
+        telemetry=telemetry,
     )
     initial = TradingAgentState(tickers=tickers, pipeline_date=pipeline_date)
     result = await graph.ainvoke(initial)

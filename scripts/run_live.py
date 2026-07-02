@@ -40,6 +40,7 @@ from trader.live.approval_server import create_app
 from trader.live.cache import GEXCache
 from trader.live.proposals import ProposalStore
 from trader.live.scanner import GEXScanner
+from trader.live.telemetry_reader import TelemetryReader
 from trader.live.watcher import FlowWatcher
 from trader.rh.mcp_config import load_rh_tools
 from trader.telemetry.logger import TelemetryLogger
@@ -70,9 +71,11 @@ async def main() -> None:
 
     logger.info("Starting live agent: tickers=%s mode=%s port=%d", tickers, mode.value, port)
 
+    telemetry_log_file = os.environ.get("TELEMETRY_LOG_FILE")
     tel = TelemetryLogger(
-        log_file=os.environ.get("TELEMETRY_LOG_FILE"),
+        log_file=telemetry_log_file,
     )
+    tel_reader = TelemetryReader(log_file=telemetry_log_file)
 
     # Load both MCP tool sets concurrently
     logger.info("Connecting to UW and RH MCP servers…")
@@ -114,7 +117,12 @@ async def main() -> None:
         tel=tel,
     )
 
-    app = create_app(proposal_store=proposal_store, executor=executor, tel=tel)
+    app = create_app(
+        proposal_store=proposal_store,
+        executor=executor,
+        tel=tel,
+        telemetry_reader=tel_reader,
+    )
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", port)

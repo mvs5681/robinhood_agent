@@ -1,0 +1,17 @@
+services:
+  agent:
+    build: .
+    ports:
+      - "8080:8080"
+    env_file: .env
+    volumes:
+      - ./logs:/app/logs
+    environment:
+      - TELEMETRY_LOG_FILE=/app/logs/telemetry.jsonl
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s

@@ -1,0 +1,234 @@
+"""Flow Watcher — polls for new whale prints every 60 s and triggers the pipeline.
+
+When a new high-premium flow alert arrives for a ticker with a valid GEX setup:
+  1. Build TradingAgentState from cached slow data + fresh alerts
+  2. Run score → flow_check → select_contracts → risk_gate
+  3. Proposed candidates go into ProposalStore for human approval (rh_approval mode)
+     or are executed immediately (autonomous mode)
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import time as _time
+from datetime import datetime, timezone
+from decimal import Decimal
+from typing import TYPE_CHECKING
+
+from langchain_core.tools import BaseTool
+
+from trader.contracts.selector import ContractSelector, SelectorParams
+from trader.executor.executor import Executor
+from trader.executor.schemas import ExecutionMode
+from trader.flow.trigger import FlowTrigger
+from trader.graph.agent import check_flow, risk_gate, score_candidates, select_contracts
+from trader.graph.state import TradingAgentState
+from trader.gex.schemas import GEXDetectorParams
+from trader.risk.engine import RiskEngine
+from trader.risk.schemas import PortfolioState, RiskParams
+from trader.scoring.scorer import BlendScorer
+from trader.telemetry.logger import TelemetryLogger
+from trader.uw.validators import parse_flow_alerts
+
+from .cache import GEXCache
+from .market_hours import is_market_hours
+from .proposals import Proposal, ProposalStore
+
+if TYPE_CHECKING:
+    from trader.uw.schemas import FlowAlert
+
+logger = logging.getLogger(__name__)
+
+_POLL_INTERVAL = 60     # seconds between flow alert polls
+_IDLE_SLEEP = 120       # seconds to sleep when market is closed
+
+
+def _apply(state: TradingAgentState, updates: dict) -> TradingAgentState:
+    return state.model_copy(update=updates)
+
+
+class FlowWatcher:
+    """
+    Polls get_flow_alerts every 60 s. On a new high-premium print for a
+    watched ticker: runs the scoring pipeline and either sends the candidate
+    to ProposalStore (rh_approval) or executes it directly (autonomous).
+    """
+
+    def __init__(
+        self,
+        tickers: list[str],
+        uw_tools: dict[str, BaseTool],
+        cache: GEXCache,
+        proposal_store: ProposalStore,
+        execution_mode: ExecutionMode,
+        executor: Executor,
+        flow_min_premium: Decimal = Decimal("100_000"),
+        flow_lookback_hours: int = 4,
+        blend_weights: dict[str, float] | None = None,
+        selector_params: SelectorParams | None = None,
+        risk_params: RiskParams | None = None,
+        sector_map: dict[str, str] | None = None,
+        tel: TelemetryLogger | None = None,
+        poll_interval: int = _POLL_INTERVAL,
+    ) -> None:
+        self.tickers = set(tickers)
+        self.uw_tools = uw_tools
+        self.cache = cache
+        self.proposal_store = proposal_store
+        self.mode = execution_mode
+        self.executor = executor
+        self.tel = tel
+        self.poll_interval = poll_interval
+
+        self._scorer = BlendScorer(blend_weights)
+        self._trigger = FlowTrigger(
+            min_premium=flow_min_premium, lookback_hours=flow_lookback_hours
+        )
+        self._selector = ContractSelector(selector_params)
+        self._engine = RiskEngine(
+            params=risk_params, portfolio=PortfolioState(), sector_map=sector_map
+        )
+        self._seen: set[str] = set()   # dedup by (ticker, expiry, strike, type, created_at)
+
+    async def run(self) -> None:
+        logger.info("FlowWatcher started — mode=%s tickers=%s", self.mode.value, sorted(self.tickers))
+        while True:
+            if not is_market_hours():
+                await asyncio.sleep(_IDLE_SLEEP)
+                continue
+            if not self.cache.ready:
+                logger.debug("FlowWatcher: GEX cache not ready yet, waiting…")
+                await asyncio.sleep(10)
+                continue
+            try:
+                await self._poll()
+            except Exception as exc:
+                logger.error("FlowWatcher poll error: %s", exc)
+            await asyncio.sleep(self.poll_interval)
+
+    async def _poll(self) -> None:
+        t0 = _time.monotonic()
+        try:
+            raw = await self.uw_tools["get_flow_alerts"].ainvoke({"limit": 100})
+            alerts: list[FlowAlert] = parse_flow_alerts(raw)
+        except Exception as exc:
+            logger.error("get_flow_alerts failed: %s", exc)
+            if self.tel:
+                self.tel.uw_fetch(endpoint="get_flow_alerts", record_count=0,
+                                  duration_ms=round((_time.monotonic() - t0) * 1000, 1),
+                                  error=str(exc))
+            return
+
+        ms = round((_time.monotonic() - t0) * 1000, 1)
+        if self.tel:
+            self.tel.uw_fetch(endpoint="get_flow_alerts",
+                              record_count=len(alerts), duration_ms=ms)
+
+        new_alerts = self._filter_new(alerts)
+        if not new_alerts:
+            return
+
+        logger.info("FlowWatcher: %d new qualifying alerts", len(new_alerts))
+
+        # Trigger pipeline once per affected ticker (deduplicate by ticker)
+        affected = {a.ticker for a in new_alerts} & self.tickers
+        tasks = [self._run_pipeline(ticker, alerts) for ticker in affected]
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    def _alert_key(self, alert: FlowAlert) -> str:
+        return f"{alert.ticker}:{alert.expiry}:{alert.strike}:{alert.type}:{alert.created_at}"
+
+    def _filter_new(self, alerts: list[FlowAlert]) -> list[FlowAlert]:
+        """Return alerts we haven't processed yet, for tickers we watch."""
+        new = []
+        for a in alerts:
+            if a.ticker not in self.tickers:
+                continue
+            key = self._alert_key(a)
+            if key not in self._seen:
+                self._seen.add(key)
+                new.append(a)
+        # Prevent unbounded growth
+        if len(self._seen) > 10_000:
+            self._seen = set(list(self._seen)[-5_000:])
+        return new
+
+    async def _run_pipeline(self, ticker: str, all_alerts: list[FlowAlert]) -> None:
+        snap = await self.cache.snapshot(ticker)
+        if snap is None or snap.gex_setup is None:
+            logger.debug("%s: no GEX setup in cache, skipping", ticker)
+            return
+
+        market_tide = self.cache.market_tide
+
+        state = TradingAgentState(
+            tickers=[ticker],
+            market_tide=market_tide,
+            flow_alerts=all_alerts,
+            spot_gex={ticker: snap.spot_gex},
+            darkpool={ticker: snap.darkpool},
+            net_prem_ticks={ticker: snap.net_prem_ticks},
+            option_contracts={ticker: snap.option_contracts},
+            interpolated_iv={ticker: snap.interpolated_iv},
+            technicals={ticker: snap.technicals},
+            gex_setups={ticker: snap.gex_setup},
+        )
+
+        # Run scoring phases — calling node functions directly, skipping fetch nodes
+        state = _apply(state, score_candidates(state, self._scorer, self.tel))
+        state = _apply(state, check_flow(state, self._trigger, self.tel))
+        state = _apply(state, select_contracts(state, self._selector, self.tel))
+        state = _apply(state, risk_gate(state, self._engine, self.tel))
+
+        proposed = [
+            c for c in state.candidates
+            if c.execution_status == "proposed" and c.selected_contract is not None
+        ]
+
+        if not proposed:
+            logger.debug("%s: no proposed candidates after pipeline", ticker)
+            return
+
+        for candidate in proposed:
+            if self.mode == ExecutionMode.PROPOSE_ONLY:
+                proposal = await self.proposal_store.add(candidate)
+                logger.info(
+                    "PROPOSE_ONLY %s proposal_id=%s composite=%.3f",
+                    ticker, proposal.proposal_id, candidate.blend_scores.composite,
+                )
+
+            elif self.mode == ExecutionMode.RH_APPROVAL:
+                # Store for human approval via the HTTP server
+                proposal = await self.proposal_store.add(candidate)
+                logger.info(
+                    "RH_APPROVAL %s proposal_id=%s — awaiting human approval",
+                    ticker, proposal.proposal_id,
+                )
+
+            elif self.mode == ExecutionMode.AUTONOMOUS:
+                try:
+                    t0 = _time.monotonic()
+                    result = await self.executor.execute(candidate)
+                    ms = round((_time.monotonic() - t0) * 1000, 1)
+                    if self.tel:
+                        lp = result.request.limit_price
+                        self.tel.order_attempt(
+                            ticker=ticker,
+                            mode=self.mode.value,
+                            action=result.request.action,
+                            quantity=result.request.quantity,
+                            limit_price=float(lp) if lp is not None else None,
+                            placed=result.placed,
+                            order_id=result.order_id,
+                            account_number=self.executor.account_number or None,
+                            rejection_reason=result.rejection_reason,
+                            review_summary=result.review_summary,
+                            duration_ms=ms,
+                        )
+                    logger.info(
+                        "AUTONOMOUS %s placed=%s order_id=%s",
+                        ticker, result.placed, result.order_id,
+                    )
+                except Exception as exc:
+                    logger.error("%s autonomous execute failed: %s", ticker, exc)

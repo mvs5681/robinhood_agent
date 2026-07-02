@@ -24,6 +24,9 @@ dev = [
     "ruff",
     "mypy",
 ]
+live = [
+    "aiohttp>=3.9",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/trader"]

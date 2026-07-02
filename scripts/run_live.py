@@ -63,14 +63,14 @@ def _require(var: str) -> str:
 
 
 async def main() -> None:
-    tickers = [t.strip().upper() for t in _require("TICKERS").split(",") if t.strip()]
+    seed_tickers = [t.strip().upper() for t in os.environ.get("TICKERS", "").split(",") if t.strip()]
     mode_str = os.environ.get("EXECUTION_MODE", "rh_approval").lower()
     mode = ExecutionMode(mode_str)
     account_number = os.environ.get("RH_ACCOUNT_NUMBER", "")
     port = int(os.environ.get("HTTP_PORT", "8080"))
     flow_min_premium = Decimal(os.environ.get("FLOW_MIN_PREMIUM", "100000"))
 
-    logger.info("Starting live agent: tickers=%s mode=%s port=%d", tickers, mode.value, port)
+    logger.info("Starting live agent: seed_tickers=%s mode=%s port=%d", seed_tickers, mode.value, port)
 
     telemetry_log_file = os.environ.get("TELEMETRY_LOG_FILE")
     tel = TelemetryLogger(
@@ -110,15 +110,19 @@ async def main() -> None:
         quantity=int(os.environ.get("ORDER_QUANTITY", "1")),
     )
 
+    discovery_min_premium = Decimal(os.environ.get("DISCOVERY_MIN_PREMIUM", "500000"))
+    max_discovered_tickers = int(os.environ.get("MAX_DISCOVERED_TICKERS", "20"))
+
     scanner = GEXScanner(
-        tickers=tickers,
         uw_tools=uw_tools,
         cache=cache,
+        seed_tickers=seed_tickers,
+        min_discovery_premium=discovery_min_premium,
+        max_discovered_tickers=max_discovered_tickers,
         tel=tel,
     )
 
     watcher = FlowWatcher(
-        tickers=tickers,
         uw_tools=uw_tools,
         cache=cache,
         proposal_store=proposal_store,

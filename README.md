@@ -31,10 +31,17 @@ The agent runs two async loops in a single process:
 
 ## Ticker selection
 
-Tickers are configured via the `TICKERS` env var. The agent does **not** scan the full market — it watches your list and gates each ticker through a structured funnel:
+Each hour the scanner calls `get_flow_alerts` (Unusual Whales) to discover which tickers have significant options premium volume. Tickers above the `DISCOVERY_MIN_PREMIUM` threshold (default $500K) are ranked by total premium and scanned for GEX structure. No static watchlist is required.
+
+You can optionally set `TICKERS` as a seed list — those tickers are always scanned regardless of flow activity that hour.
 
 ```
-Watched tickers (TICKERS env var)
+get_flow_alerts (UW MCP, every hour)
+         │
+         ▼
+  Rank by total_premium → top 20 tickers above $500K threshold
+         │
+         + merge with TICKERS seed list (optional)
          │
          ▼
   ┌─────────────┐

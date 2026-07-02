@@ -58,7 +58,6 @@ class FlowWatcher:
 
     def __init__(
         self,
-        tickers: list[str],
         uw_tools: dict[str, BaseTool],
         cache: GEXCache,
         proposal_store: ProposalStore,
@@ -74,7 +73,6 @@ class FlowWatcher:
         poll_interval: int = _POLL_INTERVAL,
         notifier: TelegramNotifier | None = None,
     ) -> None:
-        self.tickers = set(tickers)
         self.uw_tools = uw_tools
         self.cache = cache
         self.proposal_store = proposal_store
@@ -95,7 +93,7 @@ class FlowWatcher:
         self._seen: set[str] = set()   # dedup by (ticker, expiry, strike, type, created_at)
 
     async def run(self) -> None:
-        logger.info("FlowWatcher started — mode=%s tickers=%s", self.mode.value, sorted(self.tickers))
+        logger.info("FlowWatcher started — mode=%s (tracks GEXScanner cache dynamically)", self.mode.value)
         while True:
             if not is_market_hours():
                 await asyncio.sleep(_IDLE_SLEEP)
@@ -134,8 +132,13 @@ class FlowWatcher:
 
         logger.info("FlowWatcher: %d new qualifying alerts", len(new_alerts))
 
-        # Trigger pipeline once per affected ticker (deduplicate by ticker)
-        affected = {a.ticker for a in new_alerts} & self.tickers
+        # Only process tickers the GEXScanner has already cached + validated
+        cached_tickers = set(self.cache.tickers.keys())
+        affected = {a.ticker for a in new_alerts} & cached_tickers
+        if not affected:
+            logger.debug("FlowWatcher: new alerts for %s but none in GEX cache yet",
+                         {a.ticker for a in new_alerts})
+            return
         tasks = [self._run_pipeline(ticker, alerts) for ticker in affected]
         await asyncio.gather(*tasks, return_exceptions=True)
 

@@ -12,6 +12,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import time as _time
+from collections import defaultdict
+from decimal import Decimal
 from typing import TYPE_CHECKING
 
 from langchain_core.tools import BaseTool
@@ -40,33 +42,44 @@ logger = logging.getLogger(__name__)
 
 _SCAN_INTERVAL = 3600   # 1 hour between full scans
 _RETRY_INTERVAL = 300   # 5 min retry after a scan error
+_DEFAULT_MIN_PREMIUM = Decimal("500_000")   # $500K minimum premium to discover a ticker
+_DEFAULT_MAX_TICKERS = 20                   # cap parallel fetches per scan cycle
 
 
 class GEXScanner:
     """
-    Runs hourly during market hours, refreshing all slow-moving data and
-    re-computing GEX setups. Writes into the shared GEXCache.
+    Runs hourly during market hours. Each cycle:
+      1. Calls get_flow_alerts to discover which tickers have significant
+         premium volume — no static watchlist needed.
+      2. Merges with any seed_tickers that should always be scanned.
+      3. Fetches slow-moving data per ticker and runs GEX detection.
+      4. Writes results into the shared GEXCache.
     """
 
     def __init__(
         self,
-        tickers: list[str],
         uw_tools: dict[str, BaseTool],
         cache: GEXCache,
+        seed_tickers: list[str] | None = None,
+        min_discovery_premium: Decimal = _DEFAULT_MIN_PREMIUM,
+        max_discovered_tickers: int = _DEFAULT_MAX_TICKERS,
         detector_params: GEXDetectorParams | None = None,
         tel: TelemetryLogger | None = None,
         scan_interval: int = _SCAN_INTERVAL,
     ) -> None:
-        self.tickers = tickers
+        self.seed_tickers = list(seed_tickers or [])
         self.uw_tools = uw_tools
         self.cache = cache
+        self.min_discovery_premium = min_discovery_premium
+        self.max_discovered_tickers = max_discovered_tickers
         self.detector = GEXDetector(detector_params)
         self.tel = tel
         self.scan_interval = scan_interval
 
     async def run(self) -> None:
         """Main loop — runs forever, sleeping between scans."""
-        logger.info("GEXScanner started for tickers: %s", self.tickers)
+        logger.info("GEXScanner started — seed_tickers=%s discovery_min_premium=%s",
+                    self.seed_tickers, self.min_discovery_premium)
         while True:
             if not is_market_hours():
                 wait = seconds_until_market_open()
@@ -82,9 +95,55 @@ class GEXScanner:
                 logger.error("GEX scan failed: %s — retry in %d s", exc, _RETRY_INTERVAL)
                 await asyncio.sleep(_RETRY_INTERVAL)
 
+    async def _discover_tickers(self) -> list[str]:
+        """
+        Calls get_flow_alerts to find tickers with unusual premium volume.
+        Groups alerts by ticker, sums total_premium, returns the top N above
+        the minimum threshold. Merges with seed_tickers (always included).
+        """
+        t0 = _time.monotonic()
+        try:
+            raw = await self.uw_tools["get_flow_alerts"].ainvoke({"limit": 200})
+            alerts = parse_flow_alerts(raw)
+        except Exception as exc:
+            logger.error("ticker discovery via get_flow_alerts failed: %s", exc)
+            return self.seed_tickers[:]
+
+        premium_by_ticker: dict[str, Decimal] = defaultdict(Decimal)
+        for alert in alerts:
+            premium_by_ticker[alert.ticker] += alert.total_premium
+
+        # Sort descending by total premium, apply threshold, cap count
+        ranked = sorted(premium_by_ticker, key=lambda t: premium_by_ticker[t], reverse=True)
+        discovered = [
+            t for t in ranked
+            if premium_by_ticker[t] >= self.min_discovery_premium
+        ][:self.max_discovered_tickers]
+
+        ms = round((_time.monotonic() - t0) * 1000, 1)
+        logger.info(
+            "Ticker discovery: %d alerts → %d candidates above $%s (%.0f ms)",
+            len(alerts), len(discovered), self.min_discovery_premium, ms,
+        )
+        if self.tel:
+            self.tel.uw_fetch(endpoint="get_flow_alerts (discovery)",
+                              record_count=len(alerts), duration_ms=ms)
+
+        # Seed tickers always first, then discovered (dedup preserving order)
+        seen: set[str] = set()
+        combined: list[str] = []
+        for t in self.seed_tickers + discovered:
+            if t not in seen:
+                seen.add(t)
+                combined.append(t)
+        return combined
+
     async def _scan(self) -> None:
         t_start = _time.monotonic()
-        logger.info("GEXScanner: scanning %d tickers", len(self.tickers))
+
+        # Discover universe from flow activity this hour
+        tickers = await self._discover_tickers()
+        logger.info("GEXScanner: scanning %d tickers: %s", len(tickers), tickers)
 
         # Market-wide data
         market_tide = []
@@ -101,9 +160,9 @@ class GEXScanner:
 
         # Per-ticker fetches in parallel
         snapshots: dict[str, TickerSnapshot] = {}
-        tasks = [self._scan_ticker(t) for t in self.tickers]
+        tasks = [self._scan_ticker(t) for t in tickers]
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        for ticker, result in zip(self.tickers, results):
+        for ticker, result in zip(tickers, results):
             if isinstance(result, Exception):
                 logger.error("%s scan failed: %s", ticker, result)
             else:

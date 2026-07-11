@@ -84,11 +84,28 @@ class Executor:
         account_number: str,
         rh_tools: dict[str, BaseTool] | None = None,
         quantity: int = 1,
+        max_trade_spend: Decimal | None = None,
+        max_contracts: int = 20,
     ) -> None:
         self.mode = mode
         self.account_number = account_number
         self.rh_tools: dict[str, BaseTool] = rh_tools or {}
         self.quantity = quantity
+        self._max_trade_spend = max_trade_spend
+        self._max_contracts = max_contracts
+
+    def calc_quantity(self, mid: Decimal) -> int:
+        """Return contracts to buy given the option mid price.
+
+        If MAX_TRADE_SPEND is set: floor(spend / (mid * 100)), capped at
+        max_contracts and floored at 1. Falls back to fixed quantity when
+        max_trade_spend is unset or mid is zero.
+        """
+        if self._max_trade_spend is None or mid <= 0:
+            return self.quantity
+        cost_per_contract = mid * 100
+        qty = int(self._max_trade_spend / cost_per_contract)
+        return max(1, min(qty, self._max_contracts))
 
     async def execute_approved(self, candidate: CandidateSignal) -> OrderResult:
         """Place a buy that has already been approved by the human (Telegram/dashboard).
@@ -100,10 +117,11 @@ class Executor:
         contract = candidate.selected_contract
         if contract is None:
             raise ValueError(f"{candidate.ticker}: selected_contract is None")
+        qty = self.calc_quantity(contract.mid)
         request = OrderRequest(
             candidate=candidate,
             action="buy_to_open",
-            quantity=self.quantity,
+            quantity=qty,
             limit_price=contract.mid,
             mode=self.mode,
         )
@@ -119,10 +137,11 @@ class Executor:
         if contract is None:
             raise ValueError(f"{candidate.ticker}: selected_contract is None")
 
+        qty = self.calc_quantity(contract.mid)
         request = OrderRequest(
             candidate=candidate,
             action="buy_to_open",
-            quantity=self.quantity,
+            quantity=qty,
             limit_price=contract.mid,
             mode=self.mode,
         )

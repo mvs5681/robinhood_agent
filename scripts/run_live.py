@@ -108,11 +108,16 @@ async def main() -> None:
     proposal_store = ProposalStore()
     position_store = PositionStore()
 
+    max_trade_spend_raw = os.environ.get("MAX_TRADE_SPEND", "")
+    max_trade_spend = Decimal(max_trade_spend_raw) if max_trade_spend_raw else None
+
     executor = Executor(
         mode=mode,
         account_number=account_number,
         rh_tools=rh_tools,
         quantity=int(os.environ.get("ORDER_QUANTITY", "1")),
+        max_trade_spend=max_trade_spend,
+        max_contracts=int(os.environ.get("MAX_CONTRACTS", "20")),
     )
 
     discovery_min_premium = Decimal(os.environ.get("DISCOVERY_MIN_PREMIUM", "500000"))

@@ -170,6 +170,7 @@ class TelemetryLogger:
     ) -> None:
         level_name = (log_level or os.environ.get("LOG_LEVEL", "INFO")).upper()
         self._level = getattr(logging, level_name, logging.INFO)
+        self._run_id: str | None = None
 
         self._file: TextIOWrapper | None = None
         file_path = log_file or os.environ.get("TELEMETRY_LOG_FILE")
@@ -177,6 +178,16 @@ class TelemetryLogger:
             path = Path(file_path)
             path.parent.mkdir(parents=True, exist_ok=True)
             self._file = open(path, "a", encoding="utf-8")  # noqa: SIM115
+
+    def with_run_id(self, run_id: str) -> "TelemetryLogger":
+        """Return a child logger that stamps run_id on every event.
+
+        The child shares the same file handle and level — only run_id differs.
+        """
+        child = object.__new__(TelemetryLogger)
+        child.__dict__.update(self.__dict__)
+        child._run_id = run_id
+        return child
 
     def close(self) -> None:
         if self._file:
@@ -209,6 +220,8 @@ class TelemetryLogger:
             "reason": reason,
             "duration_ms": duration_ms,
         }
+        if self._run_id:
+            payload["run_id"] = self._run_id
         payload.update(extra)
         payload = _sanitize(payload)
 

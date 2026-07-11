@@ -15,6 +15,7 @@ import time as _time
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 from langchain_core.tools import BaseTool
 
@@ -166,6 +167,10 @@ class FlowWatcher:
             logger.debug("%s: no GEX setup in cache, skipping", ticker)
             return
 
+        # Unique ID linking all telemetry events for this pipeline run
+        run_id = f"{ticker}:{uuid4().hex[:8]}"
+        run_tel = self.tel.with_run_id(run_id) if self.tel else None
+
         market_tide = self.cache.market_tide
 
         state = TradingAgentState(
@@ -181,11 +186,11 @@ class FlowWatcher:
             gex_setups={ticker: snap.gex_setup},
         )
 
-        # Run scoring phases — calling node functions directly, skipping fetch nodes
-        state = _apply(state, score_candidates(state, self._scorer, self.tel))
-        state = _apply(state, check_flow(state, self._trigger, self.tel))
-        state = _apply(state, select_contracts(state, self._selector, self.tel))
-        state = _apply(state, risk_gate(state, self._engine, self.tel))
+        # Run scoring phases — node functions emit telemetry tagged with run_id
+        state = _apply(state, score_candidates(state, self._scorer, run_tel))
+        state = _apply(state, check_flow(state, self._trigger, run_tel))
+        state = _apply(state, select_contracts(state, self._selector, run_tel))
+        state = _apply(state, risk_gate(state, self._engine, run_tel))
 
         proposed = [
             c for c in state.candidates
@@ -198,7 +203,7 @@ class FlowWatcher:
 
         for candidate in proposed:
             if self.mode == ExecutionMode.PROPOSE_ONLY:
-                proposal = await self.proposal_store.add(candidate)
+                proposal = await self.proposal_store.add(candidate, run_id=run_id)
                 logger.info(
                     "PROPOSE_ONLY %s proposal_id=%s composite=%.3f",
                     ticker, proposal.proposal_id, candidate.blend_scores.composite,
@@ -207,8 +212,7 @@ class FlowWatcher:
                     await self._notifier.notify_proposal(proposal)
 
             elif self.mode == ExecutionMode.RH_APPROVAL:
-                # Store for human approval via the HTTP server
-                proposal = await self.proposal_store.add(candidate)
+                proposal = await self.proposal_store.add(candidate, run_id=run_id)
                 logger.info(
                     "RH_APPROVAL %s proposal_id=%s — awaiting human approval",
                     ticker, proposal.proposal_id,

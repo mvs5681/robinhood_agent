@@ -25,6 +25,66 @@ class Proposal:
     decided_at: datetime | None = None
     order_result: OrderResult | None = None
     rejection_note: str | None = None
+    run_id: str | None = None  # links back to telemetry events for this decision
+
+    def detail(self) -> dict:
+        """Full structured payload including all decision signals."""
+        c = self.candidate
+        sc = c.selected_contract
+        bs = c.blend_scores
+        gs = c.gex_setup
+        ft = c.flow_trigger
+        base = self.summary()
+        base.update({
+            "run_id": self.run_id,
+            "blend_scores": {
+                "composite": bs.composite,
+                "market_tide": bs.market_tide,
+                "darkpool": bs.darkpool,
+                "flow_pressure": bs.flow_pressure,
+                "iv_cost": bs.iv_cost,
+                "technicals": bs.technicals,
+            } if bs else None,
+            "gex_setup": {
+                "regime": gs.regime.value,
+                "direction": gs.candidate_direction,
+                "setup_type": gs.setup_type,
+                "confidence": gs.structure_confidence,
+                "flip_point": float(gs.flip_point) if gs.flip_point else None,
+                "target_level": float(gs.target_level) if gs.target_level else None,
+                "call_wall": float(gs.nearest_call_wall.strike) if gs.nearest_call_wall else None,
+                "put_wall": float(gs.nearest_put_wall.strike) if gs.nearest_put_wall else None,
+                "spot_price": float(gs.spot_price),
+            } if gs else None,
+            "flow_trigger": {
+                "total_premium": float(ft.total_premium),
+                "strike": float(ft.strike),
+                "expiry": ft.expiry.isoformat(),
+                "type": ft.type,
+                "has_sweep": ft.has_sweep,
+                "has_floor": ft.has_floor,
+                "alert_rule": ft.alert_rule,
+                "volume": ft.volume,
+                "open_interest": ft.open_interest,
+            } if ft else None,
+            "contract": {
+                "strike": float(sc.strike),
+                "expiry": sc.expiry.isoformat(),
+                "type": sc.type,
+                "delta": float(sc.delta) if sc.delta else None,
+                "gamma": float(sc.gamma) if sc.gamma else None,
+                "theta": float(sc.theta) if sc.theta else None,
+                "vega": float(sc.vega) if sc.vega else None,
+                "iv": float(sc.implied_volatility) if sc.implied_volatility else None,
+                "bid": float(sc.bid),
+                "ask": float(sc.ask),
+                "mid": float(sc.mid),
+                "volume": sc.volume,
+                "open_interest": sc.open_interest,
+                "spread_pct": float((sc.ask - sc.bid) / sc.mid) if sc.mid else None,
+            } if sc else None,
+        })
+        return base
 
     def summary(self) -> dict:
         c = self.candidate
@@ -62,11 +122,12 @@ class ProposalStore:
         self._proposals: dict[str, Proposal] = {}
         self._lock = asyncio.Lock()
 
-    async def add(self, candidate: CandidateSignal) -> Proposal:
+    async def add(self, candidate: CandidateSignal, run_id: str | None = None) -> Proposal:
         proposal = Proposal(
             proposal_id=str(uuid.uuid4()),
             candidate=candidate,
             created_at=datetime.now(timezone.utc),
+            run_id=run_id,
         )
         async with self._lock:
             self._proposals[proposal.proposal_id] = proposal

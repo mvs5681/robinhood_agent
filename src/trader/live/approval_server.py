@@ -1,22 +1,21 @@
-"""HTTP approval server — exposes pending proposals and accepts approve/reject actions.
+"""HTTP approval server + telemetry dashboard.
 
-Endpoints:
-    GET  /proposals          — list all pending proposals (JSON array)
-    GET  /proposals/{id}     — get one proposal (JSON)
-    POST /proposals/{id}/approve  — approve and immediately execute via Executor
-    POST /proposals/{id}/reject   — reject with optional {"note": "..."} body
-    GET  /health             — liveness check
+Proposal endpoints:
+    GET  /proposals                — list pending proposals
+    GET  /proposals/{id}           — full proposal detail
+    POST /proposals/{id}/approve   — approve and execute
+    POST /proposals/{id}/reject    — reject with optional {"note": "..."}
+    GET  /health                   — liveness check
 
-Dashboard endpoints:
-    GET  /                         — HTML dashboard
+Dashboard (served at /):
+    GET  /                         — tabbed HTML dashboard
+    GET  /api/decisions            — decisions grouped by run_id
+    GET  /api/decisions/{run_id}   — single decision detail
+    GET  /api/market               — current GEX cache state (ticker grid)
     GET  /api/telemetry/summary    — counts by stage+result (last hour)
     GET  /api/telemetry/funnel     — pipeline funnel for today
     GET  /api/telemetry/recent     — last 50 telemetry events
     GET  /api/telemetry/pnl        — exit_signal pnl_pct time series
-
-The server runs in the same asyncio event loop as the scanner and watcher.
-It is intentionally minimal — no auth on these endpoints, so you should
-run behind a reverse proxy with auth (nginx + basic auth, or Fly.io private networking).
 """
 
 from __future__ import annotations
@@ -36,6 +35,7 @@ from .telemetry_reader import TelemetryReader
 
 if TYPE_CHECKING:
     from trader.executor.executor import Executor
+    from .cache import GEXCache
 
 logger = logging.getLogger(__name__)
 
@@ -49,600 +49,847 @@ def _json_response(data, status: int = 200) -> web.Response:
 
 
 # ---------------------------------------------------------------------------
-# Dashboard HTML
+# Dashboard CSS
 # ---------------------------------------------------------------------------
 
-_DASHBOARD_HTML = """\
-<!DOCTYPE html>
+_CSS = """
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --bg: #0d1117; --surface: #161b22; --surface2: #1c2128;
+  --border: #30363d; --text: #c9d1d9; --muted: #8b949e;
+  --green: #3fb950; --yellow: #d29922; --red: #f85149;
+  --blue: #58a6ff; --purple: #bc8cff; --orange: #ffa657;
+  --radius: 6px; --drawer-w: 520px;
+}
+body { font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+       background:var(--bg); color:var(--text); font-size:13px; line-height:1.5;
+       overflow-x:hidden; }
+
+/* ── Header ── */
+header { background:var(--surface); border-bottom:1px solid var(--border);
+         padding:10px 20px; display:flex; align-items:center; gap:14px; position:sticky;
+         top:0; z-index:100; }
+header h1 { font-size:16px; font-weight:700; }
+#badge-mode { font-size:11px; padding:2px 8px; border-radius:20px;
+              background:rgba(88,166,255,.15); color:var(--blue); border:1px solid var(--blue); }
+#refresh-timer { margin-left:auto; font-size:11px; color:var(--muted); }
+
+/* ── Tabs ── */
+nav.tabs { display:flex; border-bottom:1px solid var(--border);
+           background:var(--surface); padding:0 20px; }
+nav.tabs button { background:none; border:none; color:var(--muted); cursor:pointer;
+                  padding:10px 16px; font-size:13px; border-bottom:2px solid transparent;
+                  transition:.15s; }
+nav.tabs button.active { color:var(--text); border-bottom-color:var(--blue); }
+nav.tabs button:hover:not(.active) { color:var(--text); }
+
+/* ── Tab panes ── */
+.tab-pane { display:none; padding:20px; }
+.tab-pane.active { display:block; }
+
+/* ── Market grid ── */
+#market-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(240px,1fr)); gap:12px; }
+.ticker-card { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius);
+               padding:14px; cursor:pointer; transition:border-color .15s; }
+.ticker-card:hover { border-color:var(--blue); }
+.ticker-card.regime-negative { border-left:3px solid var(--red); }
+.ticker-card.regime-positive { border-left:3px solid var(--blue); }
+.ticker-card.regime-mixed { border-left:3px solid var(--muted); }
+.card-header { display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; }
+.card-ticker { font-size:16px; font-weight:700; }
+.badge { font-size:10px; padding:2px 7px; border-radius:12px; font-weight:600; text-transform:uppercase; }
+.badge-neg { background:rgba(248,81,73,.15); color:var(--red); border:1px solid var(--red); }
+.badge-pos { background:rgba(88,166,255,.15); color:var(--blue); border:1px solid var(--blue); }
+.badge-mix { background:rgba(139,148,158,.15); color:var(--muted); border:1px solid var(--border); }
+.card-direction { font-size:12px; color:var(--muted); }
+.bar-row { display:flex; align-items:center; gap:8px; margin:4px 0; }
+.bar-label { font-size:11px; color:var(--muted); width:72px; text-align:right; flex-shrink:0; }
+.bar-wrap { flex:1; background:var(--bg); border-radius:3px; height:6px; overflow:hidden; }
+.bar-fill { height:100%; border-radius:3px; background:var(--blue); }
+.bar-val { font-size:11px; color:var(--text); width:30px; }
+.card-footer { margin-top:10px; font-size:11px; color:var(--muted); display:flex; gap:12px; flex-wrap:wrap; }
+.card-footer span b { color:var(--text); }
+
+/* ── Decisions table ── */
+.section-header { display:flex; align-items:center; gap:10px; margin-bottom:12px; }
+.section-header h2 { font-size:14px; font-weight:600; }
+table { width:100%; border-collapse:collapse; }
+th { text-align:left; font-size:11px; text-transform:uppercase; letter-spacing:.06em;
+     color:var(--muted); padding:6px 10px; border-bottom:1px solid var(--border); }
+td { padding:8px 10px; border-bottom:1px solid rgba(48,54,61,.5); vertical-align:middle; }
+tr.clickable:hover td { background:rgba(255,255,255,.03); cursor:pointer; }
+tr:last-child td { border-bottom:none; }
+.outcome-pill { display:inline-block; padding:2px 8px; border-radius:12px; font-size:11px; font-weight:600; }
+.out-proposed  { background:rgba(88,166,255,.15); color:var(--blue); }
+.out-executed  { background:rgba(63,185,80,.15); color:var(--green); }
+.out-skipped   { background:rgba(210,153,34,.15); color:var(--yellow); }
+.out-error     { background:rgba(248,81,73,.15); color:var(--red); }
+
+/* ── Proposals ── */
+.proposal-card { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius);
+                 padding:16px; margin-bottom:14px; }
+.proposal-card.expired { opacity:.5; }
+.prop-header { display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:12px; }
+.prop-title { font-size:15px; font-weight:700; }
+.prop-meta { font-size:11px; color:var(--muted); }
+.prop-ttl { font-size:11px; color:var(--yellow); }
+.prop-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:14px; }
+.prop-section { background:var(--bg); border-radius:4px; padding:10px; }
+.prop-section-title { font-size:10px; text-transform:uppercase; letter-spacing:.08em;
+                      color:var(--muted); margin-bottom:8px; }
+.kv-row { display:flex; justify-content:space-between; font-size:12px; margin:3px 0; }
+.kv-row .k { color:var(--muted); }
+.kv-row .v { color:var(--text); font-weight:500; }
+.prop-actions { display:flex; gap:10px; }
+.btn { padding:7px 20px; border-radius:5px; border:none; cursor:pointer; font-size:13px;
+       font-weight:600; transition:opacity .15s; }
+.btn:hover { opacity:.8; }
+.btn:disabled { opacity:.35; cursor:not-allowed; }
+.btn-approve { background:var(--green); color:#000; flex:1; }
+.btn-reject  { background:rgba(248,81,73,.2); color:var(--red); border:1px solid var(--red); flex:1; }
+
+/* ── Drawer ── */
+#drawer { position:fixed; top:0; right:0; width:var(--drawer-w); height:100vh;
+          background:var(--surface); border-left:1px solid var(--border);
+          transform:translateX(100%); transition:transform .25s ease;
+          overflow-y:auto; z-index:200; display:flex; flex-direction:column; }
+#drawer.open { transform:translateX(0); }
+#drawer-header { display:flex; align-items:center; gap:10px; padding:14px 16px;
+                 border-bottom:1px solid var(--border); position:sticky; top:0;
+                 background:var(--surface); z-index:1; }
+#drawer-title { font-size:15px; font-weight:700; flex:1; }
+#drawer-close { background:none; border:none; color:var(--muted); cursor:pointer;
+                font-size:18px; padding:4px 8px; }
+#drawer-close:hover { color:var(--text); }
+#drawer-body { padding:16px; flex:1; }
+.d-section { margin-bottom:16px; }
+.d-section-title { font-size:11px; text-transform:uppercase; letter-spacing:.08em;
+                   color:var(--muted); margin-bottom:10px; padding-bottom:6px;
+                   border-bottom:1px solid var(--border); display:flex; align-items:center; gap:6px; }
+.d-section-title .status-dot { width:7px; height:7px; border-radius:50%; flex-shrink:0; }
+.dot-ok { background:var(--green); }
+.dot-skip { background:var(--yellow); }
+.dot-err { background:var(--red); }
+.d-grid { display:grid; grid-template-columns:1fr 1fr; gap:6px; }
+.d-kv { display:flex; flex-direction:column; }
+.d-kv .k { font-size:10px; color:var(--muted); }
+.d-kv .v { font-size:13px; color:var(--text); font-weight:500; }
+.score-bar-row { display:flex; align-items:center; gap:8px; margin:4px 0; }
+.score-bar-label { font-size:11px; color:var(--muted); width:100px; }
+.score-bar-wrap { flex:1; background:var(--bg); border-radius:3px; height:8px; overflow:hidden; }
+.score-bar-fill { height:100%; border-radius:3px; }
+.score-bar-val { font-size:11px; color:var(--text); width:36px; text-align:right; }
+.skip-reason { font-size:12px; color:var(--yellow); margin-top:6px;
+               background:rgba(210,153,34,.1); padding:6px 10px; border-radius:4px; }
+.err-reason { font-size:12px; color:var(--red); margin-top:6px;
+              background:rgba(248,81,73,.1); padding:6px 10px; border-radius:4px; }
+
+/* ── Radar chart ── */
+.radar-wrap { display:flex; justify-content:center; margin:4px 0 8px; }
+
+/* ── GEX ruler ── */
+.ruler-wrap { margin:8px 0; overflow:visible; }
+
+/* ── Glossary ── */
+#glossary-btn { position:fixed; bottom:20px; right:20px; background:var(--surface2);
+                border:1px solid var(--border); border-radius:20px; padding:6px 14px;
+                color:var(--muted); cursor:pointer; font-size:12px; z-index:150;
+                transition:color .15s; }
+#glossary-btn:hover { color:var(--text); }
+#glossary-panel { position:fixed; bottom:60px; right:20px; width:340px; max-height:420px;
+                  overflow-y:auto; background:var(--surface); border:1px solid var(--border);
+                  border-radius:var(--radius); padding:14px; z-index:150; display:none; }
+#glossary-panel.open { display:block; }
+.gloss-title { font-size:12px; font-weight:700; color:var(--text); margin-bottom:10px; }
+.gloss-term { margin-bottom:8px; }
+.gloss-term dt { font-size:12px; font-weight:600; color:var(--blue); }
+.gloss-term dd { font-size:11px; color:var(--muted); margin-left:8px; line-height:1.5; }
+
+/* ── Log table ── */
+.log-wrap { max-height:500px; overflow-y:auto; }
+.result-ok   { color:var(--green); }
+.result-skip { color:var(--yellow); }
+.result-err  { color:var(--red); }
+.empty-msg { color:var(--muted); font-style:italic; padding:20px 0; text-align:center; }
+::-webkit-scrollbar { width:6px; }
+::-webkit-scrollbar-track { background:var(--bg); }
+::-webkit-scrollbar-thumb { background:var(--border); border-radius:3px; }
+[data-tip] { cursor:help; border-bottom:1px dashed var(--muted); }
+"""
+
+# ---------------------------------------------------------------------------
+# Dashboard JS
+# ---------------------------------------------------------------------------
+
+_JS = r"""
+const GLOSSARY = {
+  "GEX": "Gamma Exposure — net dealer hedging obligation. Negative GEX means dealers amplify price moves (momentum/squeezes). Positive GEX means they suppress moves (pinning/mean-reversion).",
+  "Regime": "GEX direction classification. Negative = amplified moves, follow the flow. Positive = suppressed moves, fade extremes. Mixed = no clean structure, skip.",
+  "Flip Point": "Price where net GEX crosses zero. Below it dealers buy dips (stabilising), above it they sell rips (destabilising). Acts as a gravitational fulcrum for price.",
+  "Call Wall": "Strike with the highest call gamma concentration. Dealers who sold these calls must sell underlying as price rises — acts as resistance / ceiling.",
+  "Put Wall": "Strike with the highest put gamma concentration. Dealers buy underlying as price falls toward it — acts as a support floor.",
+  "Target Level": "Primary exit price derived from the nearest GEX wall in the trade direction. Trade is closed when underlying reaches this level.",
+  "Composite Score": "Weighted average of the 5 signal scores, 0–1. Threshold to proceed: 0.55. Higher = stronger multi-signal conviction.",
+  "Market Tide": "Directional bias of net options premium flow market-wide. Measures whether call or put buyers are in control. Score 0 = bearish dominance, 1 = bullish dominance.",
+  "Darkpool": "Institutional off-exchange block trade pressure. High score = large blocks printing at or above ask (stealth accumulation). Low = distribution.",
+  "Flow Pressure": "Fraction of flow alerts aligned with the trade direction + net-premium momentum over 4 hours. Measures persistence of directional conviction.",
+  "IV Cost": "Implied volatility cost score. Low IV percentile = cheap options = high score. Entering when IV is elevated means overpaying for gamma — lowers conviction.",
+  "Technicals": "RSI + MACD timing alignment score. Measures how well price momentum and trend confirm the GEX directional setup.",
+  "Delta": "Option price change per $1 move in the underlying. Target range: 0.30–0.55 (near-the-money). Deep ITM has high delta but poor leverage; far OTM has low probability.",
+  "DTE": "Days To Expiration. Target: 7–45 days. Too short increases theta decay risk; too long ties up capital and reduces leverage.",
+  "Spread %": "Bid-ask spread as a % of mid price. High spread = poor liquidity = expensive to enter/exit. Filtered above 15%.",
+  "Alert Premium": "Total dollar value of the whale option print (size × premium × 100). Minimum $100K to trigger the flow gate.",
+  "Sweep": "Order routed across multiple exchanges simultaneously to fill immediately — signals urgency and strong directional conviction.",
+  "Floor Trade": "Large block executed at a specific exchange, often at or above ask — typically institutional positioning.",
+  "Structure Confidence": "0–1 score for GEX setup quality. Derived from concentration of gamma at the top 3 strikes and strength of the regime ratio. Below 0.15 = mixed regime, skip.",
+};
+
+// ── Tabs ──────────────────────────────────────────────────────────────
+function initTabs() {
+  document.querySelectorAll('nav.tabs button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('nav.tabs button').forEach(b => b.classList.remove('active'));
+      document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
+      btn.classList.add('active');
+      document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
+    });
+  });
+}
+
+// ── Drawer ────────────────────────────────────────────────────────────
+const drawer = document.getElementById('drawer');
+function openDrawer(runId) {
+  fetch('/api/decisions/' + encodeURIComponent(runId))
+    .then(r => r.json())
+    .then(d => renderDrawer(d));
+  drawer.classList.add('open');
+}
+function closeDrawer() { drawer.classList.remove('open'); }
+document.getElementById('drawer-close').addEventListener('click', closeDrawer);
+
+function renderDrawer(d) {
+  document.getElementById('drawer-title').textContent =
+    d.ticker + ' — ' + (d.stages.gex_setup?.direction || '') + ' — ' + formatOutcome(d.outcome);
+
+  const html = [];
+  const gs = d.stages.gex_setup;
+  const bs = d.stages.blend_score;
+  const fc = d.stages.flow_check;
+  const cs = d.stages.contract_select;
+  const rc = d.stages.risk_check;
+  const oa = d.stages.order_attempt;
+
+  // GEX Setup
+  html.push(sectionHeader('GEX Setup', gs));
+  if (gs) {
+    if (gs.result === 'ok') {
+      html.push(gexRuler(gs));
+      html.push('<div class="d-grid">');
+      html.push(kv('Regime', tip(capitalize(gs.regime), 'Regime')));
+      html.push(kv('Setup Type', capitalize(gs.setup_type || '')));
+      html.push(kv('Direction', capitalize(gs.direction || '')));
+      html.push(kv('Confidence', tip(fmtPct(gs.confidence), 'Structure Confidence')));
+      html.push(kv('Flip Point', tip(fmtPrice(gs.flip_point), 'Flip Point')));
+      html.push(kv('Target', tip(fmtPrice(gs.target_level), 'Target Level')));
+      html.push(kv('Call Wall', tip(fmtPrice(gs.call_wall), 'Call Wall')));
+      html.push(kv('Put Wall', tip(fmtPrice(gs.put_wall), 'Put Wall')));
+      html.push('</div>');
+    } else {
+      html.push(skipBox(gs.reason || gs.result));
+    }
+  }
+
+  // Blend Score
+  html.push(sectionHeader('Blend Score', bs));
+  if (bs) {
+    if (bs.result === 'ok') {
+      html.push(radarChart(bs.scores || {}));
+      html.push('<div style="margin:8px 0">');
+      const scoreColors = {market_tide:'#58a6ff',darkpool:'#bc8cff',flow_pressure:'#ffa657',iv_cost:'#3fb950',technicals:'#d29922'};
+      const scoreLabels = {market_tide:'Market Tide',darkpool:'Darkpool',flow_pressure:'Flow Pressure',iv_cost:'IV Cost',technicals:'Technicals'};
+      html.push(scoreLine('Composite', bs.composite, 'var(--blue)', 'Composite Score'));
+      for (const [k, label] of Object.entries(scoreLabels)) {
+        html.push(scoreLine(label, (bs.scores||{})[k], scoreColors[k], k.replace('_',' ').replace(/\b\w/g,c=>c.toUpperCase())));
+      }
+      html.push('</div>');
+    } else {
+      html.push(skipBox(bs.reason || bs.result));
+    }
+  }
+
+  // Flow Check
+  html.push(sectionHeader('Flow Trigger', fc));
+  if (fc) {
+    if (fc.confirmed) {
+      html.push('<div class="d-grid">');
+      html.push(kv('Premium', tip(fmtDollar(fc.alert_premium), 'Alert Premium')));
+      html.push(kv('Direction', capitalize(fc.direction || '')));
+      html.push('</div>');
+    } else {
+      html.push(skipBox(fc.reason || 'No matching whale print'));
+    }
+  }
+
+  // Contract
+  html.push(sectionHeader('Contract', cs));
+  if (cs) {
+    if (cs.selected) {
+      html.push('<div class="d-grid">');
+      html.push(kv('Strike', fmtPrice(cs.strike)));
+      html.push(kv('Expiry', cs.expiry || ''));
+      html.push(kv('Delta', tip(cs.delta?.toFixed(3) || '—', 'Delta')));
+      html.push(kv('DTE', tip(cs.dte + ' days', 'DTE')));
+      html.push(kv('Spread', tip(fmtPct(cs.spread_pct), 'Spread %')));
+      html.push('</div>');
+    } else {
+      html.push(skipBox(cs.reason || cs.result));
+    }
+  }
+
+  // Risk Gate
+  html.push(sectionHeader('Risk Gate', rc));
+  if (rc) {
+    if (rc.approved) {
+      html.push('<div style="color:var(--green);font-size:12px;padding:4px 0">✓ All risk checks passed</div>');
+    } else {
+      const reasons = rc.rejection_reasons || [];
+      html.push(skipBox(reasons.length ? reasons.join('; ') : (rc.reason || 'Risk gate failed')));
+    }
+  }
+
+  // Order
+  html.push(sectionHeader('Order', oa));
+  if (oa) {
+    html.push('<div class="d-grid">');
+    html.push(kv('Mode', oa.mode || '—'));
+    html.push(kv('Placed', oa.placed ? '✓ Yes' : '✗ No'));
+    if (oa.limit_price) html.push(kv('Limit Price', fmtPrice(oa.limit_price)));
+    if (oa.order_id) html.push(kv('Order ID', oa.order_id));
+    html.push('</div>');
+    if (oa.review_summary) {
+      html.push('<div style="font-size:11px;color:var(--muted);margin-top:8px;padding:8px;background:var(--bg);border-radius:4px;line-height:1.6">'
+        + oa.review_summary + '</div>');
+    }
+  }
+
+  document.getElementById('drawer-body').innerHTML = html.join('');
+}
+
+function sectionHeader(title, stage) {
+  const result = stage?.result || 'missing';
+  const dotClass = result === 'ok' ? 'dot-ok' : result === 'skipped' ? 'dot-skip' : result === 'error' ? 'dot-err' : 'dot-skip';
+  return `<div class="d-section-title"><span class="status-dot ${dotClass}"></span>${title}</div>`;
+}
+function kv(k, v) { return `<div class="d-kv"><span class="k">${k}</span><span class="v">${v}</span></div>`; }
+function skipBox(msg) { return `<div class="skip-reason">⊘ ${msg || 'skipped'}</div>`; }
+function tip(val, term) { return `<span data-tip="${term}" title="${GLOSSARY[term]||''}">${val}</span>`; }
+function capitalize(s) { return s ? s.charAt(0).toUpperCase() + s.slice(1) : ''; }
+function fmtPrice(v) { return v != null ? '$' + parseFloat(v).toFixed(2) : '—'; }
+function fmtPct(v) { return v != null ? (parseFloat(v)*100).toFixed(1) + '%' : '—'; }
+function fmtDollar(v) { return v != null ? '$' + Number(v).toLocaleString() : '—'; }
+
+function scoreLine(label, val, color, tipKey) {
+  const pct = Math.min(100, Math.max(0, (val || 0) * 100));
+  return `<div class="score-bar-row">
+    <span class="score-bar-label">${tip(label, tipKey)}</span>
+    <div class="score-bar-wrap"><div class="score-bar-fill" style="width:${pct}%;background:${color}"></div></div>
+    <span class="score-bar-val">${(val||0).toFixed(2)}</span>
+  </div>`;
+}
+
+// ── Radar chart (SVG) ─────────────────────────────────────────────────
+function radarChart(scores) {
+  const cx=110, cy=110, r=80, n=5;
+  const keys=['market_tide','darkpool','flow_pressure','iv_cost','technicals'];
+  const labels=['Market Tide','Darkpool','Flow Pressure','IV Cost','Technicals'];
+  const colors=['#58a6ff','#bc8cff','#ffa657','#3fb950','#d29922'];
+  const ang = i => (Math.PI*2*i/n) - Math.PI/2;
+  const pt  = (i,v) => [cx + Math.cos(ang(i))*r*v, cy + Math.sin(ang(i))*r*v];
+
+  let s = `<svg viewBox="0 0 220 220" width="200" height="200">`;
+  // rings
+  for (const v of [.25,.5,.75,1]) {
+    const pts = keys.map((_,i)=>pt(i,v).join(',')).join(' ');
+    s += `<polygon points="${pts}" fill="none" stroke="var(--border)" stroke-width="${v===1?1.5:1}"/>`;
+  }
+  // axes
+  for (let i=0;i<n;i++) { const [x,y]=pt(i,1); s+=`<line x1="${cx}" y1="${cy}" x2="${x}" y2="${y}" stroke="var(--border)" stroke-width="1"/>`; }
+  // filled polygon
+  const pts = keys.map((k,i)=>pt(i,Math.max(0,scores[k]||0)).join(',')).join(' ');
+  s += `<polygon points="${pts}" fill="rgba(88,166,255,.2)" stroke="var(--blue)" stroke-width="2"/>`;
+  // dots + labels
+  for (let i=0;i<n;i++) {
+    const v=Math.max(0,scores[keys[i]]||0);
+    const [x,y]=pt(i,v);
+    s += `<circle cx="${x}" cy="${y}" r="4" fill="${colors[i]}"/>`;
+    const [lx,ly]=pt(i,1.28);
+    const anchor=lx<cx-5?'end':lx>cx+5?'start':'middle';
+    s += `<text x="${lx}" y="${ly}" text-anchor="${anchor}" font-size="9" fill="var(--muted)">${labels[i]}</text>`;
+  }
+  s += `</svg>`;
+  return `<div class="radar-wrap">${s}</div>`;
+}
+
+// ── GEX Ruler (SVG) ───────────────────────────────────────────────────
+function gexRuler(gs) {
+  const markers = [
+    {key:'put_wall',  label:'Put Wall',   color:'var(--red)',    above:false, val:gs.put_wall},
+    {key:'flip_point',label:'Flip',       color:'var(--yellow)', above:true,  val:gs.flip_point},
+    {key:'spot_price',label:'Spot',       color:'var(--text)',   above:false, val:gs.spot_price},
+    {key:'call_wall', label:'Call Wall',  color:'var(--blue)',   above:false, val:gs.call_wall},
+    {key:'target_level',label:'Target',  color:'var(--green)',  above:true,  val:gs.target_level},
+  ].filter(m => m.val != null);
+
+  if (markers.length < 2) return '';
+  const vals = markers.map(m=>m.val);
+  const lo = Math.min(...vals), hi = Math.max(...vals);
+  const pad = (hi - lo) * 0.1 || 1;
+  const minV = lo - pad, maxV = hi + pad;
+  const W=440, H=72, lpad=24, rpad=24;
+  const sc = v => lpad + (v-minV)/(maxV-minV)*(W-lpad-rpad);
+
+  let s = `<svg viewBox="0 0 ${W} ${H}" width="100%" style="max-width:440px">`;
+  s += `<line x1="${lpad}" y1="${H/2}" x2="${W-rpad}" y2="${H/2}" stroke="var(--border)" stroke-width="2" stroke-linecap="round"/>`;
+
+  for (const m of markers) {
+    const x = sc(m.val);
+    s += `<line x1="${x}" y1="${H/2-10}" x2="${x}" y2="${H/2+10}" stroke="${m.color}" stroke-width="2"/>`;
+    const labY = m.above ? H/2-18 : H/2+20;
+    const priceY = m.above ? H/2-7  : H/2+31;
+    s += `<text x="${x}" y="${labY}" text-anchor="middle" font-size="9" fill="${m.color}" font-weight="600">${m.label}</text>`;
+    s += `<text x="${x}" y="${priceY}" text-anchor="middle" font-size="9" fill="var(--muted)">$${parseFloat(m.val).toFixed(1)}</text>`;
+  }
+  s += `</svg>`;
+  return `<div class="ruler-wrap">${s}</div>`;
+}
+
+// ── Market tab ────────────────────────────────────────────────────────
+async function loadMarket() {
+  const data = await fetch('/api/market').then(r=>r.json());
+  const grid = document.getElementById('market-grid');
+  if (!data.length) { grid.innerHTML = '<div class="empty-msg">No tickers in cache — scanner not yet run.</div>'; return; }
+  grid.innerHTML = data.map(t => {
+    const regimeClass = t.regime === 'negative' ? 'regime-negative' : t.regime === 'positive' ? 'regime-positive' : 'regime-mixed';
+    const badgeClass = t.regime === 'negative' ? 'badge-neg' : t.regime === 'positive' ? 'badge-pos' : 'badge-mix';
+    const badgeText = t.regime === 'negative' ? 'NEG' : t.regime === 'positive' ? 'POS' : 'MIX';
+    const dir = t.direction === 'call' ? '↑ Call' : t.direction === 'put' ? '↓ Put' : '—';
+    const conf = (t.confidence||0)*100;
+    const score = (t.composite_score||0)*100;
+    return `<div class="ticker-card ${regimeClass}" onclick="openDrawer('market:${t.ticker}')">
+      <div class="card-header">
+        <span class="card-ticker">${t.ticker}</span>
+        <span class="badge ${badgeClass}">${badgeText}</span>
+      </div>
+      <div class="card-direction">${dir} · ${capitalize(t.setup_type||'')}</div>
+      <div class="bar-row" style="margin-top:10px">
+        <span class="bar-label">Confidence</span>
+        <div class="bar-wrap"><div class="bar-fill" style="width:${conf}%"></div></div>
+        <span class="bar-val">${conf.toFixed(0)}%</span>
+      </div>
+      <div class="card-footer">
+        <span><b>${t.ticker}</b></span>
+        ${t.flip_point ? `<span>Flip <b>$${parseFloat(t.flip_point).toFixed(1)}</b></span>` : ''}
+        ${t.target_level ? `<span>Target <b>$${parseFloat(t.target_level).toFixed(1)}</b></span>` : ''}
+        ${t.stale ? '<span style="color:var(--red)">● Stale</span>' : '<span style="color:var(--green)">● Live</span>'}
+      </div>
+    </div>`;
+  }).join('');
+}
+
+// ── Decisions tab ─────────────────────────────────────────────────────
+function formatOutcome(o) {
+  if (o === 'executed')  return '<span class="outcome-pill out-executed">Executed</span>';
+  if (o === 'proposed')  return '<span class="outcome-pill out-proposed">Proposed</span>';
+  if (o?.startsWith('skipped')) return '<span class="outcome-pill out-skipped">' + o.replace('skipped_','Skipped: ') + '</span>';
+  if (o?.startsWith('error'))   return '<span class="outcome-pill out-error">' + o.replace('error_','Error: ') + '</span>';
+  return '<span class="outcome-pill out-skipped">' + (o||'unknown') + '</span>';
+}
+
+async function loadDecisions() {
+  const data = await fetch('/api/decisions').then(r=>r.json());
+  const wrap = document.getElementById('decisions-wrap');
+  if (!data.length) { wrap.innerHTML = '<div class="empty-msg">No decisions with run_id yet. Run the watcher to populate.</div>'; return; }
+  wrap.innerHTML = `<table>
+    <thead><tr>
+      <th>Time</th><th>Ticker</th><th>Direction</th><th>Setup</th><th>Composite</th><th>Outcome</th>
+    </tr></thead>
+    <tbody>
+    ${data.map(d => {
+      const gs = d.stages.gex_setup;
+      const bs = d.stages.blend_score;
+      const dir = gs?.direction ? capitalize(gs.direction) : '—';
+      const setup = gs?.setup_type ? capitalize(gs.setup_type) : '—';
+      const score = bs?.composite != null ? bs.composite.toFixed(2) : '—';
+      const ts = d.timestamp ? new Date(d.timestamp).toLocaleTimeString() : '—';
+      return `<tr class="clickable" onclick="openDrawer('${d.run_id}')">
+        <td>${ts}</td>
+        <td><b>${d.ticker}</b></td>
+        <td>${dir}</td>
+        <td>${setup}</td>
+        <td>${score}</td>
+        <td>${formatOutcome(d.outcome)}</td>
+      </tr>`;
+    }).join('')}
+    </tbody></table>`;
+}
+
+// ── Proposals tab ─────────────────────────────────────────────────────
+async function loadProposals() {
+  const data = await fetch('/proposals').then(r=>r.json());
+  const wrap = document.getElementById('proposals-wrap');
+  if (!data.length) { wrap.innerHTML = '<div class="empty-msg">No pending proposals.</div>'; return; }
+  wrap.innerHTML = data.map(p => {
+    const expires = p.created_at ? Math.max(0, 30 - Math.round((Date.now() - new Date(p.created_at)) / 60000)) : '?';
+    const sc = p.contract || {};
+    const gs = p.gex_setup || {};
+    const bs = p.blend_scores || {};
+    const ft = p.flow_trigger || {};
+    return `<div class="proposal-card" id="prop-${p.proposal_id}">
+      <div class="prop-header">
+        <div>
+          <div class="prop-title">${p.ticker} ${sc.strike ? '$'+sc.strike : ''} ${sc.type?.toUpperCase()||''} · ${sc.expiry||''}</div>
+          <div class="prop-meta">Composite: <b>${(bs.composite||0).toFixed(2)}</b> · ${capitalize(gs.regime||'')} · ${capitalize(gs.setup_type||'')}</div>
+        </div>
+        <div class="prop-ttl">Expires in ${expires}m</div>
+      </div>
+      <div class="prop-grid">
+        <div class="prop-section">
+          <div class="prop-section-title">GEX Setup</div>
+          ${gexRuler(gs)}
+          <div class="kv-row"><span class="k">Regime</span><span class="v">${tip(capitalize(gs.regime||''), 'Regime')}</span></div>
+          <div class="kv-row"><span class="k">Confidence</span><span class="v">${tip(fmtPct(gs.confidence), 'Structure Confidence')}</span></div>
+          <div class="kv-row"><span class="k">Flip Point</span><span class="v">${tip(fmtPrice(gs.flip_point), 'Flip Point')}</span></div>
+          <div class="kv-row"><span class="k">Target</span><span class="v">${tip(fmtPrice(gs.target_level), 'Target Level')}</span></div>
+        </div>
+        <div class="prop-section">
+          <div class="prop-section-title">Blend Score</div>
+          ${radarChart(bs)}
+          <div class="kv-row"><span class="k">Composite</span><span class="v">${tip((bs.composite||0).toFixed(2), 'Composite Score')}</span></div>
+        </div>
+        <div class="prop-section">
+          <div class="prop-section-title">Flow Trigger</div>
+          <div class="kv-row"><span class="k">Premium</span><span class="v">${tip(fmtDollar(ft.total_premium), 'Alert Premium')}</span></div>
+          <div class="kv-row"><span class="k">Strike</span><span class="v">${fmtPrice(ft.strike)}</span></div>
+          <div class="kv-row"><span class="k">Sweep</span><span class="v">${tip(ft.has_sweep?'Yes':'No','Sweep')}</span></div>
+          <div class="kv-row"><span class="k">Floor</span><span class="v">${tip(ft.has_floor?'Yes':'No','Floor Trade')}</span></div>
+        </div>
+        <div class="prop-section">
+          <div class="prop-section-title">Contract</div>
+          <div class="kv-row"><span class="k">Limit</span><span class="v">${fmtPrice(sc.mid)}</span></div>
+          <div class="kv-row"><span class="k">Delta</span><span class="v">${tip(sc.delta?.toFixed(3)||'—','Delta')}</span></div>
+          <div class="kv-row"><span class="k">DTE</span><span class="v">${tip(p.dte+' days'||'—','DTE')}</span></div>
+          <div class="kv-row"><span class="k">Spread</span><span class="v">${tip(fmtPct(sc.spread_pct),'Spread %')}</span></div>
+          <div class="kv-row"><span class="k">OI</span><span class="v">${(sc.open_interest||0).toLocaleString()}</span></div>
+          <div class="kv-row"><span class="k">IV</span><span class="v">${fmtPct(sc.iv)}</span></div>
+        </div>
+      </div>
+      <div class="prop-actions">
+        <button class="btn btn-approve" onclick="approveProposal('${p.proposal_id}', this)">✓ Approve</button>
+        <button class="btn btn-reject"  onclick="rejectProposal('${p.proposal_id}', this)">✗ Reject</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function approveProposal(id, btn) {
+  btn.disabled = true; btn.textContent = 'Placing...';
+  const r = await fetch('/proposals/'+id+'/approve', {method:'POST'});
+  const d = await r.json();
+  const card = document.getElementById('prop-'+id);
+  if (r.ok) { card.style.opacity='.5'; btn.textContent='✓ Approved'; }
+  else { btn.disabled=false; btn.textContent='✓ Approve'; alert(d.error||'Error'); }
+}
+async function rejectProposal(id, btn) {
+  const note = prompt('Rejection note (optional):') ?? '';
+  btn.disabled = true;
+  const r = await fetch('/proposals/'+id+'/reject', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({note})});
+  if (r.ok) { document.getElementById('prop-'+id).style.opacity='.5'; btn.textContent='✗ Rejected'; }
+  else { btn.disabled=false; }
+}
+
+// ── Log tab ───────────────────────────────────────────────────────────
+async function loadLog() {
+  const data = await fetch('/api/telemetry/recent').then(r=>r.json());
+  const wrap = document.getElementById('log-wrap');
+  if (!data.length) { wrap.innerHTML='<div class="empty-msg">No events yet.</div>'; return; }
+  wrap.innerHTML = `<table>
+    <thead><tr><th>Time</th><th>Stage</th><th>Ticker</th><th>Result</th><th>Reason / Detail</th></tr></thead>
+    <tbody>${data.map(e => {
+      const cls = e.result==='ok'?'ok':e.result==='skipped'?'skip':'err';
+      const ts = e.timestamp ? new Date(e.timestamp).toLocaleTimeString() : '';
+      return `<tr><td>${ts}</td><td>${e.stage||''}</td><td>${e.ticker||''}</td>
+        <td class="result-${cls}">${e.result||''}</td>
+        <td style="color:var(--muted);font-size:11px">${e.reason||''}</td></tr>`;
+    }).join('')}</tbody></table>`;
+}
+
+// ── Overview stats ────────────────────────────────────────────────────
+async function loadOverview() {
+  const d = await fetch('/api/telemetry/summary').then(r=>r.json());
+  document.getElementById('ov-ok').textContent   = d.by_result?.ok    || 0;
+  document.getElementById('ov-skip').textContent = d.by_result?.skipped|| 0;
+  document.getElementById('ov-err').textContent  = d.by_result?.error  || 0;
+  document.getElementById('ov-total').textContent= d.total || 0;
+}
+
+// ── Glossary ──────────────────────────────────────────────────────────
+function initGlossary() {
+  const btn   = document.getElementById('glossary-btn');
+  const panel = document.getElementById('glossary-panel');
+  const dl = Object.entries(GLOSSARY).map(([t,d])=>
+    `<div class="gloss-term"><dt>${t}</dt><dd>${d}</dd></div>`).join('');
+  panel.innerHTML = `<div class="gloss-title">Glossary</div><dl>${dl}</dl>`;
+  btn.addEventListener('click', () => panel.classList.toggle('open'));
+}
+
+// ── Refresh loop ──────────────────────────────────────────────────────
+let countdown = 15;
+function tick() {
+  countdown--;
+  document.getElementById('refresh-timer').textContent = `Refresh in ${countdown}s`;
+  if (countdown <= 0) {
+    countdown = 15;
+    refreshAll();
+  }
+}
+function refreshAll() {
+  loadOverview();
+  const activeTab = document.querySelector('nav.tabs button.active')?.dataset.tab;
+  if (activeTab === 'market')     loadMarket();
+  if (activeTab === 'decisions')  loadDecisions();
+  if (activeTab === 'proposals')  loadProposals();
+  if (activeTab === 'log')        loadLog();
+}
+
+// ── Boot ──────────────────────────────────────────────────────────────
+initTabs();
+initGlossary();
+loadOverview();
+loadMarket();       // always pre-load market on boot
+refreshAll();
+setInterval(tick, 1000);
+
+// Switch to decisions tab auto-loads
+document.querySelectorAll('nav.tabs button').forEach(btn => {
+  btn.addEventListener('click', () => { countdown = 15; refreshAll(); });
+});
+"""
+
+# ---------------------------------------------------------------------------
+# Dashboard HTML shell
+# ---------------------------------------------------------------------------
+
+_DASHBOARD_HTML = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>GEX Trading Agent Dashboard</title>
-  <style>
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-    :root {
-      --bg: #0d1117;
-      --surface: #161b22;
-      --border: #30363d;
-      --text: #c9d1d9;
-      --muted: #8b949e;
-      --green: #3fb950;
-      --yellow: #d29922;
-      --red: #f85149;
-      --blue: #58a6ff;
-      --accent: #1f6feb;
-      --radius: 6px;
-    }
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-           background: var(--bg); color: var(--text); font-size: 14px; line-height: 1.5; }
-    header { background: var(--surface); border-bottom: 1px solid var(--border);
-             padding: 12px 24px; display: flex; align-items: center; gap: 16px; }
-    header h1 { font-size: 18px; font-weight: 600; }
-    #refresh-badge { margin-left: auto; font-size: 12px; color: var(--muted); }
-    #refresh-badge span { color: var(--green); }
-    main { padding: 20px 24px; display: grid; gap: 20px; }
-    .panel { background: var(--surface); border: 1px solid var(--border);
-             border-radius: var(--radius); padding: 16px; }
-    .panel-title { font-size: 13px; font-weight: 600; text-transform: uppercase;
-                   letter-spacing: 0.08em; color: var(--muted); margin-bottom: 14px; }
-    /* Overview */
-    .stat-row { display: flex; gap: 16px; flex-wrap: wrap; }
-    .stat-card { flex: 1; min-width: 90px; background: var(--bg);
-                 border: 1px solid var(--border); border-radius: var(--radius);
-                 padding: 12px 16px; text-align: center; }
-    .stat-card .num { font-size: 28px; font-weight: 700; }
-    .stat-card .lbl { font-size: 11px; color: var(--muted); text-transform: uppercase;
-                      letter-spacing: 0.06em; margin-top: 2px; }
-    .ok-color { color: var(--green); }
-    .skip-color { color: var(--yellow); }
-    .err-color { color: var(--red); }
-    /* Funnel */
-    .funnel-row { display: flex; flex-direction: column; gap: 8px; }
-    .funnel-stage { display: grid; grid-template-columns: 130px 1fr 80px;
-                    align-items: center; gap: 10px; }
-    .funnel-stage .stage-name { font-size: 12px; color: var(--muted); text-align: right; }
-    .funnel-bar-wrap { background: var(--bg); border-radius: 3px; height: 18px;
-                       position: relative; overflow: hidden; border: 1px solid var(--border); }
-    .funnel-bar-ok   { background: var(--green); height: 100%; float: left; }
-    .funnel-bar-skip { background: var(--yellow); height: 100%; float: left; }
-    .funnel-bar-err  { background: var(--red);    height: 100%; float: left; }
-    .funnel-stage .count-label { font-size: 12px; color: var(--text); }
-    /* Proposals table */
-    table { width: 100%; border-collapse: collapse; font-size: 13px; }
-    th { text-align: left; font-size: 11px; text-transform: uppercase;
-         letter-spacing: 0.06em; color: var(--muted); padding: 6px 10px;
-         border-bottom: 1px solid var(--border); }
-    td { padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: middle; }
-    tr:last-child td { border-bottom: none; }
-    tr:hover td { background: rgba(255,255,255,0.02); }
-    .btn { display: inline-block; padding: 4px 12px; border-radius: 4px; border: none;
-           cursor: pointer; font-size: 12px; font-weight: 600; transition: opacity 0.15s; }
-    .btn:hover { opacity: 0.8; }
-    .btn-approve { background: var(--green); color: #000; }
-    .btn-reject  { background: var(--red);   color: #fff; margin-left: 6px; }
-    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
-    /* Recent events */
-    .events-wrap { max-height: 320px; overflow-y: auto; }
-    .result-ok   { color: var(--green); }
-    .result-skip { color: var(--yellow); }
-    .result-err  { color: var(--red); }
-    /* P&L canvas */
-    #pnl-canvas { display: block; width: 100%; height: 180px; background: var(--bg);
-                  border-radius: 4px; border: 1px solid var(--border); }
-    .empty-msg { color: var(--muted); font-style: italic; font-size: 13px; padding: 12px 0; }
-    /* Scrollbar */
-    ::-webkit-scrollbar { width: 6px; }
-    ::-webkit-scrollbar-track { background: var(--bg); }
-    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
-  </style>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>GEX Trading Agent</title>
+  <style>{_CSS}</style>
 </head>
 <body>
 
 <header>
   <h1>GEX Trading Agent</h1>
-  <div id="refresh-badge">Auto-refresh: <span id="countdown">10</span>s</div>
+  <span id="badge-mode">rh_approval</span>
+  <div style="display:flex;gap:16px;margin-left:auto;align-items:center">
+    <div style="display:flex;gap:10px;font-size:12px">
+      <span style="color:var(--muted)">Last hr:</span>
+      <span style="color:var(--green)"><b id="ov-ok">—</b> ok</span>
+      <span style="color:var(--yellow)"><b id="ov-skip">—</b> skip</span>
+      <span style="color:var(--red)"><b id="ov-err">—</b> err</span>
+      <span style="color:var(--muted)"><b id="ov-total">—</b> total</span>
+    </div>
+    <span id="refresh-timer" style="color:var(--muted);font-size:11px">Refresh in 15s</span>
+  </div>
 </header>
 
-<main>
+<nav class="tabs">
+  <button class="active" data-tab="market">Market</button>
+  <button data-tab="decisions">Decisions</button>
+  <button data-tab="proposals">Proposals</button>
+  <button data-tab="log">Log</button>
+</nav>
 
-  <!-- 1. Overview -->
-  <div class="panel">
-    <div class="panel-title">Overview — last hour</div>
-    <div class="stat-row" id="overview-stats">
-      <div class="stat-card"><div class="num ok-color" id="ov-ok">--</div><div class="lbl">OK</div></div>
-      <div class="stat-card"><div class="num skip-color" id="ov-skip">--</div><div class="lbl">Skipped</div></div>
-      <div class="stat-card"><div class="num err-color" id="ov-err">--</div><div class="lbl">Errors</div></div>
-      <div class="stat-card"><div class="num" id="ov-total">--</div><div class="lbl">Total</div></div>
-    </div>
+<div id="tab-market" class="tab-pane active">
+  <div id="market-grid"><div class="empty-msg">Loading…</div></div>
+</div>
+
+<div id="tab-decisions" class="tab-pane">
+  <div id="decisions-wrap"><div class="empty-msg">Loading…</div></div>
+</div>
+
+<div id="tab-proposals" class="tab-pane">
+  <div id="proposals-wrap"><div class="empty-msg">Loading…</div></div>
+</div>
+
+<div id="tab-log" class="tab-pane">
+  <div class="log-wrap" id="log-wrap"><div class="empty-msg">Loading…</div></div>
+</div>
+
+<!-- Detail drawer -->
+<div id="drawer">
+  <div id="drawer-header">
+    <span id="drawer-title">Decision Detail</span>
+    <button id="drawer-close">×</button>
   </div>
+  <div id="drawer-body"></div>
+</div>
 
-  <!-- 2. Pipeline funnel -->
-  <div class="panel">
-    <div class="panel-title">Pipeline funnel — today</div>
-    <div class="funnel-row" id="funnel-body">
-      <div class="empty-msg">Loading…</div>
-    </div>
-  </div>
+<!-- Glossary -->
+<button id="glossary-btn">? Glossary</button>
+<div id="glossary-panel"></div>
 
-  <!-- 3. Live proposals -->
-  <div class="panel">
-    <div class="panel-title">Live proposals <span id="proposals-count" style="color:var(--muted);font-weight:400;font-size:12px;margin-left:8px;"></span></div>
-    <div id="proposals-wrap">
-      <div class="empty-msg">Loading…</div>
-    </div>
-  </div>
-
-  <!-- 4. Recent events -->
-  <div class="panel">
-    <div class="panel-title">Recent events</div>
-    <div class="events-wrap">
-      <table id="events-table">
-        <thead>
-          <tr>
-            <th>Time</th>
-            <th>Stage</th>
-            <th>Ticker</th>
-            <th>Result</th>
-            <th>Reason</th>
-            <th>ms</th>
-          </tr>
-        </thead>
-        <tbody id="events-body">
-          <tr><td colspan="6" class="empty-msg">Loading…</td></tr>
-        </tbody>
-      </table>
-    </div>
-  </div>
-
-  <!-- 5. P&L timeline -->
-  <div class="panel">
-    <div class="panel-title">P&L timeline — exit signals</div>
-    <canvas id="pnl-canvas"></canvas>
-    <div id="pnl-empty" class="empty-msg" style="display:none;">No exit signal events yet.</div>
-  </div>
-
-</main>
-
-<script>
-// ------------------------------------------------------------------ helpers
-
-function fmtTime(iso) {
-  if (!iso) return '';
-  const d = new Date(iso);
-  return d.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', second: '2-digit'});
-}
-
-function resultClass(r) {
-  if (r === 'ok') return 'result-ok';
-  if (r === 'skipped') return 'result-skip';
-  return 'result-err';
-}
-
-function esc(s) {
-  if (s == null) return '';
-  return String(s)
-    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
-    .replace(/"/g,'&quot;');
-}
-
-// ------------------------------------------------------------------ overview
-
-async function loadOverview() {
-  const data = await fetch('/api/telemetry/summary').then(r => r.json()).catch(() => null);
-  if (!data) return;
-  const br = data.by_result || {};
-  document.getElementById('ov-ok').textContent    = br.ok      ?? 0;
-  document.getElementById('ov-skip').textContent  = br.skipped ?? 0;
-  document.getElementById('ov-err').textContent   = br.error   ?? 0;
-  document.getElementById('ov-total').textContent = data.total  ?? 0;
-}
-
-// ------------------------------------------------------------------ funnel
-
-async function loadFunnel() {
-  const data = await fetch('/api/telemetry/funnel').then(r => r.json()).catch(() => null);
-  const el = document.getElementById('funnel-body');
-  if (!data || !data.length) { el.innerHTML = '<div class="empty-msg">No data yet.</div>'; return; }
-
-  const maxOk = Math.max(1, ...data.map(s => s.ok));
-
-  el.innerHTML = data.map(s => {
-    const total = s.ok + s.skipped + s.error;
-    const pOk   = total ? (s.ok   / total * 100).toFixed(1) : 0;
-    const pSkip = total ? (s.skipped / total * 100).toFixed(1) : 0;
-    const pErr  = total ? (s.error / total * 100).toFixed(1) : 0;
-    // bar width based on ok count relative to max
-    const barW  = maxOk ? (s.ok / maxOk * 100).toFixed(1) : 0;
-    return `<div class="funnel-stage">
-      <div class="stage-name">${esc(s.stage)}</div>
-      <div class="funnel-bar-wrap" title="ok:${s.ok} skipped:${s.skipped} error:${s.error}">
-        <div class="funnel-bar-ok"   style="width:${pOk}%"></div>
-        <div class="funnel-bar-skip" style="width:${pSkip}%"></div>
-        <div class="funnel-bar-err"  style="width:${pErr}%"></div>
-      </div>
-      <div class="count-label ok-color">${s.ok}</div>
-    </div>`;
-  }).join('');
-}
-
-// ------------------------------------------------------------------ proposals
-
-async function loadProposals() {
-  const data = await fetch('/proposals').then(r => r.json()).catch(() => null);
-  const wrap = document.getElementById('proposals-wrap');
-  const badge = document.getElementById('proposals-count');
-
-  if (!data) { wrap.innerHTML = '<div class="empty-msg">Could not load proposals.</div>'; return; }
-
-  const pending = data.filter(p => p.status === 'pending');
-  badge.textContent = pending.length ? `(${pending.length} pending)` : '';
-
-  if (!pending.length) {
-    wrap.innerHTML = '<div class="empty-msg">No pending proposals.</div>';
-    return;
-  }
-
-  wrap.innerHTML = `<table>
-    <thead><tr>
-      <th>Ticker</th><th>Strike</th><th>Expiry</th><th>Score</th>
-      <th>Regime</th><th>Limit $</th><th>Actions</th>
-    </tr></thead>
-    <tbody>
-    ${pending.map(p => `<tr id="prop-${esc(p.proposal_id)}">
-      <td><strong>${esc(p.ticker)}</strong></td>
-      <td>${p.strike != null ? p.strike : '—'}</td>
-      <td>${esc(p.expiry) || '—'}</td>
-      <td>${p.composite_score != null ? p.composite_score.toFixed(3) : '—'}</td>
-      <td>${esc(p.regime) || '—'}</td>
-      <td>${p.limit_price != null ? '$' + p.limit_price.toFixed(2) : '—'}</td>
-      <td>
-        <button class="btn btn-approve" onclick="doApprove('${esc(p.proposal_id)}')">Approve</button>
-        <button class="btn btn-reject"  onclick="doReject('${esc(p.proposal_id)}')">Reject</button>
-      </td>
-    </tr>`).join('')}
-    </tbody>
-  </table>`;
-}
-
-async function doApprove(id) {
-  const row = document.getElementById('prop-' + id);
-  if (row) row.querySelectorAll('button').forEach(b => b.disabled = true);
-  try {
-    const res = await fetch('/proposals/' + id + '/approve', {method: 'POST'});
-    const json = await res.json();
-    if (row) row.querySelector('.btn-approve').textContent = json.placed ? 'Placed!' : 'Approved';
-  } catch(e) {
-    if (row) row.querySelector('.btn-approve').textContent = 'Error';
-  }
-  setTimeout(loadProposals, 1500);
-}
-
-async function doReject(id) {
-  const note = prompt('Rejection note (optional):') || '';
-  const row = document.getElementById('prop-' + id);
-  if (row) row.querySelectorAll('button').forEach(b => b.disabled = true);
-  try {
-    await fetch('/proposals/' + id + '/reject', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({note})
-    });
-    if (row) row.querySelector('.btn-reject').textContent = 'Rejected';
-  } catch(e) {
-    if (row) row.querySelector('.btn-reject').textContent = 'Error';
-  }
-  setTimeout(loadProposals, 1500);
-}
-
-// ------------------------------------------------------------------ recent events
-
-async function loadRecent() {
-  const data = await fetch('/api/telemetry/recent').then(r => r.json()).catch(() => null);
-  const tbody = document.getElementById('events-body');
-  if (!data || !data.length) {
-    tbody.innerHTML = '<tr><td colspan="6" class="empty-msg">No events yet.</td></tr>';
-    return;
-  }
-  tbody.innerHTML = data.map(ev => {
-    const rc = resultClass(ev.result);
-    return `<tr>
-      <td style="white-space:nowrap;color:var(--muted)">${fmtTime(ev.timestamp)}</td>
-      <td>${esc(ev.stage)}</td>
-      <td>${esc(ev.ticker) || '<span style="color:var(--muted)">—</span>'}</td>
-      <td class="${rc}">${esc(ev.result)}</td>
-      <td style="max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted)"
-          title="${esc(ev.reason)}">${esc(ev.reason) || ''}</td>
-      <td style="color:var(--muted)">${ev.duration_ms != null ? ev.duration_ms : ''}</td>
-    </tr>`;
-  }).join('');
-}
-
-// ------------------------------------------------------------------ P&L chart
-
-async function loadPnl() {
-  const data = await fetch('/api/telemetry/pnl').then(r => r.json()).catch(() => null);
-  const canvas = document.getElementById('pnl-canvas');
-  const empty  = document.getElementById('pnl-empty');
-
-  if (!data || !data.length) {
-    canvas.style.display = 'none';
-    empty.style.display  = 'block';
-    return;
-  }
-  canvas.style.display = 'block';
-  empty.style.display  = 'none';
-
-  const dpr  = window.devicePixelRatio || 1;
-  const W    = canvas.offsetWidth  || 600;
-  const H    = canvas.offsetHeight || 180;
-  canvas.width  = W * dpr;
-  canvas.height = H * dpr;
-  const ctx  = canvas.getContext('2d');
-  ctx.scale(dpr, dpr);
-
-  const pad = { top: 20, right: 20, bottom: 30, left: 52 };
-  const cw  = W - pad.left - pad.right;
-  const ch  = H - pad.top  - pad.bottom;
-
-  const vals = data.map(d => d.pnl_pct);
-  const minV = Math.min(...vals);
-  const maxV = Math.max(...vals);
-  const range = maxV - minV || 1;
-
-  function xOf(i) { return pad.left + (i / (vals.length - 1 || 1)) * cw; }
-  function yOf(v) { return pad.top  + (1 - (v - minV) / range) * ch; }
-
-  // Grid lines
-  ctx.strokeStyle = 'rgba(48,54,61,0.8)';
-  ctx.lineWidth   = 1;
-  for (let i = 0; i <= 4; i++) {
-    const y = pad.top + (i / 4) * ch;
-    ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(W - pad.right, y); ctx.stroke();
-    const label = (maxV - (i / 4) * range).toFixed(1) + '%';
-    ctx.fillStyle = '#8b949e'; ctx.font = '10px sans-serif'; ctx.textAlign = 'right';
-    ctx.fillText(label, pad.left - 6, y + 4);
-  }
-
-  // Zero line
-  if (minV < 0 && maxV > 0) {
-    const zy = yOf(0);
-    ctx.strokeStyle = 'rgba(139,148,158,0.4)';
-    ctx.setLineDash([4, 4]);
-    ctx.beginPath(); ctx.moveTo(pad.left, zy); ctx.lineTo(W - pad.right, zy); ctx.stroke();
-    ctx.setLineDash([]);
-  }
-
-  // Gradient fill
-  const grad = ctx.createLinearGradient(0, pad.top, 0, pad.top + ch);
-  grad.addColorStop(0,   'rgba(63,185,80,0.35)');
-  grad.addColorStop(1,   'rgba(63,185,80,0.0)');
-
-  ctx.beginPath();
-  ctx.moveTo(xOf(0), yOf(vals[0]));
-  for (let i = 1; i < vals.length; i++) ctx.lineTo(xOf(i), yOf(vals[i]));
-  ctx.lineTo(xOf(vals.length - 1), pad.top + ch);
-  ctx.lineTo(xOf(0), pad.top + ch);
-  ctx.closePath();
-  ctx.fillStyle = grad; ctx.fill();
-
-  // Line
-  ctx.beginPath();
-  ctx.strokeStyle = '#3fb950'; ctx.lineWidth = 2;
-  ctx.moveTo(xOf(0), yOf(vals[0]));
-  for (let i = 1; i < vals.length; i++) ctx.lineTo(xOf(i), yOf(vals[i]));
-  ctx.stroke();
-
-  // Dots
-  for (let i = 0; i < vals.length; i++) {
-    const v = vals[i];
-    ctx.beginPath();
-    ctx.arc(xOf(i), yOf(v), 3.5, 0, Math.PI * 2);
-    ctx.fillStyle = v >= 0 ? '#3fb950' : '#f85149';
-    ctx.fill();
-  }
-
-  // X-axis tick labels (up to 8)
-  const step = Math.max(1, Math.floor(data.length / 8));
-  ctx.fillStyle = '#8b949e'; ctx.font = '10px sans-serif'; ctx.textAlign = 'center';
-  for (let i = 0; i < data.length; i += step) {
-    const lbl = data[i].ticker || fmtTime(data[i].timestamp);
-    ctx.fillText(lbl, xOf(i), H - 8);
-  }
-}
-
-// ------------------------------------------------------------------ refresh loop
-
-let countdown = 10;
-
-async function refreshAll() {
-  await Promise.all([loadOverview(), loadFunnel(), loadProposals(), loadRecent(), loadPnl()]);
-}
-
-refreshAll();
-
-setInterval(() => {
-  countdown -= 1;
-  document.getElementById('countdown').textContent = countdown;
-  if (countdown <= 0) {
-    countdown = 10;
-    refreshAll();
-  }
-}, 1000);
-</script>
+<script>{_JS}</script>
 </body>
-</html>
-"""
+</html>"""
 
 
 # ---------------------------------------------------------------------------
-# App factory
+# Route handlers
 # ---------------------------------------------------------------------------
-
 
 def create_app(
     proposal_store: ProposalStore,
-    executor: "Executor",
+    executor: Executor,
     tel: TelemetryLogger | None = None,
     telemetry_reader: TelemetryReader | None = None,
+    cache: GEXCache | None = None,
 ) -> web.Application:
+    reader = telemetry_reader or TelemetryReader()
+
     app = web.Application()
 
-    _tel_reader = telemetry_reader or TelemetryReader()
-
-    # ------------------------------------------------------------------ #
-    # GET /health
-    # ------------------------------------------------------------------ #
-
-    async def health(_: web.Request) -> web.Response:
+    # ── Health ──────────────────────────────────────────────────────────
+    async def health(req: web.Request) -> web.Response:
         return _json_response({"status": "ok"})
 
-    # ------------------------------------------------------------------ #
-    # GET /proposals
-    # ------------------------------------------------------------------ #
+    # ── Dashboard ───────────────────────────────────────────────────────
+    async def dashboard(req: web.Request) -> web.Response:
+        return web.Response(text=_DASHBOARD_HTML, content_type="text/html")
 
-    async def list_proposals(_: web.Request) -> web.Response:
+    # ── Proposals ───────────────────────────────────────────────────────
+    async def list_proposals(req: web.Request) -> web.Response:
         pending = await proposal_store.list_pending()
-        return _json_response([p.summary() for p in pending])
+        return _json_response([p.detail() for p in pending])
 
-    # ------------------------------------------------------------------ #
-    # GET /proposals/{id}
-    # ------------------------------------------------------------------ #
-
-    async def get_proposal(request: web.Request) -> web.Response:
-        pid = request.match_info["id"]
-        proposal = await proposal_store.get(pid)
-        if proposal is None:
+    async def get_proposal(req: web.Request) -> web.Response:
+        pid = req.match_info["id"]
+        p = await proposal_store.get(pid)
+        if p is None:
             return _json_response({"error": "not found"}, status=404)
-        return _json_response(proposal.summary())
+        return _json_response(p.detail())
 
-    # ------------------------------------------------------------------ #
-    # POST /proposals/{id}/approve
-    # ------------------------------------------------------------------ #
-
-    async def approve_proposal(request: web.Request) -> web.Response:
-        pid = request.match_info["id"]
+    async def approve_proposal(req: web.Request) -> web.Response:
+        pid = req.match_info["id"]
         proposal = await proposal_store.approve(pid)
         if proposal is None:
-            return _json_response({"error": "not found or not pending"}, status=404)
-
-        ticker = proposal.candidate.ticker
-        logger.info("Human approved proposal %s for %s", pid, ticker)
-
-        # Execute immediately via the executor in autonomous mode
-        # (bypasses interrupt — human already gave approval via HTTP)
+            return _json_response({"error": "proposal not found or already decided"}, status=404)
+        t0 = _time.monotonic()
         try:
-            t0 = _time.monotonic()
-            # Temporarily use autonomous logic for the approved candidate
-            saved_mode = executor.mode
-            executor.mode = ExecutionMode.AUTONOMOUS
             result = await executor.execute(proposal.candidate)
-            executor.mode = saved_mode
             ms = round((_time.monotonic() - t0) * 1000, 1)
-
-            await proposal_store.mark_executed(pid, result)
-
             if tel:
-                lp = result.request.limit_price
+                c = proposal.candidate
+                sc = c.selected_contract
                 tel.order_attempt(
-                    ticker=ticker,
-                    mode="rh_approval_via_http",
-                    action=result.request.action,
-                    quantity=result.request.quantity,
-                    limit_price=float(lp) if lp is not None else None,
+                    ticker=c.ticker,
+                    mode="rh_approval",
+                    action="buy",
+                    quantity=1,
+                    limit_price=float(sc.mid) if sc else None,
                     placed=result.placed,
                     order_id=result.order_id,
-                    account_number=executor.account_number or None,
+                    account_number=None,
                     rejection_reason=result.rejection_reason,
                     review_summary=result.review_summary,
                     duration_ms=ms,
                 )
-
-            logger.info("%s order placed=%s order_id=%s", ticker, result.placed, result.order_id)
-            return _json_response({
-                "approved": True,
-                "placed": result.placed,
-                "order_id": result.order_id,
-                "rejection_reason": result.rejection_reason,
-                "review_summary": result.review_summary,
-            })
-
+            await proposal_store.mark_executed(pid, result)
+            return _json_response({"status": "executed", "placed": result.placed, "order_id": result.order_id})
         except Exception as exc:
-            logger.error("Execute after approval failed for %s: %s", pid, exc)
+            logger.error("Execute failed for proposal %s: %s", pid, exc)
             return _json_response({"error": str(exc)}, status=500)
 
-    # ------------------------------------------------------------------ #
-    # POST /proposals/{id}/reject
-    # ------------------------------------------------------------------ #
-
-    async def reject_proposal(request: web.Request) -> web.Response:
-        pid = request.match_info["id"]
+    async def reject_proposal(req: web.Request) -> web.Response:
+        pid = req.match_info["id"]
         note = ""
         try:
-            body = await request.json()
+            body = await req.json()
             note = body.get("note", "")
         except Exception:
             pass
-
         proposal = await proposal_store.reject(pid, note=note)
         if proposal is None:
-            return _json_response({"error": "not found or not pending"}, status=404)
+            return _json_response({"error": "proposal not found or already decided"}, status=404)
+        return _json_response({"status": "rejected"})
 
-        logger.info("Human rejected proposal %s: %s", pid, note or "(no note)")
-        return _json_response({"rejected": True, "proposal_id": pid, "note": note})
+    # ── Decisions API ───────────────────────────────────────────────────
+    async def list_decisions(req: web.Request) -> web.Response:
+        limit = int(req.rel_url.query.get("limit", "200"))
+        return _json_response(reader.decisions(limit=limit))
 
-    # ------------------------------------------------------------------ #
-    # GET / — Dashboard HTML
-    # ------------------------------------------------------------------ #
+    async def get_decision(req: web.Request) -> web.Response:
+        run_id = req.match_info["run_id"]
+        # Also check proposal store for rich gex/blend/contract data
+        detail = reader.decision_detail(run_id)
+        if detail is None:
+            return _json_response({"error": "not found"}, status=404)
+        return _json_response(detail)
 
-    async def dashboard(_: web.Request) -> web.Response:
-        return web.Response(text=_DASHBOARD_HTML, content_type="text/html")
+    # ── Market API ──────────────────────────────────────────────────────
+    async def market_snapshot(req: web.Request) -> web.Response:
+        if cache is None:
+            return _json_response([])
+        snapshots = await cache.all_snapshots()
+        out = []
+        for ticker, snap in snapshots.items():
+            gs = snap.gex_setup
+            if gs is None:
+                continue
+            out.append({
+                "ticker": ticker,
+                "regime": gs.regime.value,
+                "direction": gs.candidate_direction,
+                "setup_type": gs.setup_type,
+                "confidence": gs.structure_confidence,
+                "flip_point": float(gs.flip_point) if gs.flip_point else None,
+                "target_level": float(gs.target_level) if gs.target_level else None,
+                "call_wall": float(gs.nearest_call_wall.strike) if gs.nearest_call_wall else None,
+                "put_wall": float(gs.nearest_put_wall.strike) if gs.nearest_put_wall else None,
+                "spot_price": float(gs.spot_price),
+                "last_scan": snap.refreshed_at.isoformat(),
+                "stale": snap.is_stale,
+            })
+        out.sort(key=lambda t: t["confidence"], reverse=True)
+        return _json_response(out)
 
-    # ------------------------------------------------------------------ #
-    # GET /api/telemetry/summary
-    # ------------------------------------------------------------------ #
+    # ── Telemetry API ───────────────────────────────────────────────────
+    async def telemetry_summary(req: web.Request) -> web.Response:
+        return _json_response(reader.summary_last_hour())
 
-    async def telemetry_summary(_: web.Request) -> web.Response:
-        data = _tel_reader.summary_last_hour()
-        return _json_response(data)
+    async def telemetry_funnel(req: web.Request) -> web.Response:
+        return _json_response(reader.funnel_today())
 
-    # ------------------------------------------------------------------ #
-    # GET /api/telemetry/funnel
-    # ------------------------------------------------------------------ #
+    async def telemetry_recent(req: web.Request) -> web.Response:
+        n = int(req.rel_url.query.get("n", "50"))
+        return _json_response(reader.recent(n=n))
 
-    async def telemetry_funnel(_: web.Request) -> web.Response:
-        data = _tel_reader.funnel_today()
-        return _json_response(data)
+    async def telemetry_pnl(req: web.Request) -> web.Response:
+        return _json_response(reader.pnl_series())
 
-    # ------------------------------------------------------------------ #
-    # GET /api/telemetry/recent
-    # ------------------------------------------------------------------ #
-
-    async def telemetry_recent(_: web.Request) -> web.Response:
-        data = _tel_reader.recent(50)
-        return _json_response(data)
-
-    # ------------------------------------------------------------------ #
-    # GET /api/telemetry/pnl
-    # ------------------------------------------------------------------ #
-
-    async def telemetry_pnl(_: web.Request) -> web.Response:
-        data = _tel_reader.pnl_series()
-        return _json_response(data)
-
-    # ------------------------------------------------------------------ #
-    # Route wiring
-    # ------------------------------------------------------------------ #
-
-    app.router.add_get("/", dashboard)
     app.router.add_get("/health", health)
+    app.router.add_get("/", dashboard)
     app.router.add_get("/proposals", list_proposals)
     app.router.add_get("/proposals/{id}", get_proposal)
     app.router.add_post("/proposals/{id}/approve", approve_proposal)
     app.router.add_post("/proposals/{id}/reject", reject_proposal)
+    app.router.add_get("/api/decisions", list_decisions)
+    app.router.add_get("/api/decisions/{run_id}", get_decision)
+    app.router.add_get("/api/market", market_snapshot)
     app.router.add_get("/api/telemetry/summary", telemetry_summary)
-    app.router.add_get("/api/telemetry/funnel",  telemetry_funnel)
-    app.router.add_get("/api/telemetry/recent",  telemetry_recent)
-    app.router.add_get("/api/telemetry/pnl",     telemetry_pnl)
+    app.router.add_get("/api/telemetry/funnel", telemetry_funnel)
+    app.router.add_get("/api/telemetry/recent", telemetry_recent)
+    app.router.add_get("/api/telemetry/pnl", telemetry_pnl)
 
     return app

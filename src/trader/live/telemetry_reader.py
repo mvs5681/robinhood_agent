@@ -24,6 +24,55 @@ FUNNEL_STAGES = [
     "order_attempt",
 ]
 
+# Stages that form one decision (excludes uw_fetch which is market-wide)
+DECISION_STAGES = [
+    "gex_setup",
+    "blend_score",
+    "flow_check",
+    "contract_select",
+    "risk_check",
+    "order_attempt",
+]
+
+_INTERNAL_KEYS = frozenset({"_ts"})
+
+
+def _build_decision(run_id: str, events: list[dict]) -> dict:
+    ticker = next((e.get("ticker") for e in events if e.get("ticker")), "")
+    first_ts = events[0].get("_ts")
+    timestamp = first_ts.isoformat() if first_ts else events[0].get("timestamp", "")
+
+    stages: dict[str, dict] = {}
+    for ev in events:
+        stage = ev.get("stage", "")
+        if stage in DECISION_STAGES:
+            stages[stage] = {k: v for k, v in ev.items() if k not in _INTERNAL_KEYS}
+
+    # Determine outcome from first failed stage
+    outcome = "proposed"
+    for stage_name in DECISION_STAGES:
+        s = stages.get(stage_name, {})
+        result = s.get("result", "")
+        if result == "error":
+            outcome = f"error_{stage_name}"
+            break
+        if result == "skipped":
+            outcome = f"skipped_{stage_name}"
+            break
+
+    # Override if order was actually placed
+    order = stages.get("order_attempt", {})
+    if order.get("placed"):
+        outcome = "executed"
+
+    return {
+        "run_id": run_id,
+        "ticker": ticker,
+        "timestamp": timestamp,
+        "outcome": outcome,
+        "stages": stages,
+    }
+
 
 class TelemetryReader:
     """Reads and caches telemetry events from a JSONL log file.
@@ -172,6 +221,46 @@ class TelemetryReader:
                 item["timestamp"] = ts.isoformat()
             out.append(item)
         return out
+
+    def decisions(self, limit: int = 200) -> list[dict[str, Any]]:
+        """Group pipeline events by run_id into structured decision objects.
+
+        Returns most-recent decisions first. Events without a run_id are skipped
+        (they predate the run_id feature or come from non-pipeline stages).
+        """
+        with self._lock:
+            events = self._get_events()
+
+        runs: dict[str, list[dict]] = defaultdict(list)
+        for ev in events:
+            rid = ev.get("run_id")
+            if rid:
+                runs[rid].append(ev)
+
+        out = []
+        for rid, evts in runs.items():
+            evts_sorted = sorted(
+                evts,
+                key=lambda e: e.get("_ts") or datetime.min.replace(tzinfo=timezone.utc),
+            )
+            out.append(_build_decision(rid, evts_sorted))
+
+        out.sort(key=lambda d: d["timestamp"], reverse=True)
+        return out[:limit]
+
+    def decision_detail(self, run_id: str) -> dict[str, Any] | None:
+        """Return the full decision object for a single run_id."""
+        with self._lock:
+            events = self._get_events()
+
+        evts = [e for e in events if e.get("run_id") == run_id]
+        if not evts:
+            return None
+        evts_sorted = sorted(
+            evts,
+            key=lambda e: e.get("_ts") or datetime.min.replace(tzinfo=timezone.utc),
+        )
+        return _build_decision(run_id, evts_sorted)
 
     def pnl_series(self) -> list[dict[str, Any]]:
         """Return all exit_signal events as a pnl_pct time series.

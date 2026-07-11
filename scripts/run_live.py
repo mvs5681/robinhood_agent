@@ -138,6 +138,7 @@ async def main() -> None:
         executor=executor,
         tel=tel,
         telemetry_reader=tel_reader,
+        cache=cache,
     )
     runner = web.AppRunner(app)
     await runner.setup()

@@ -24,7 +24,9 @@ import aiohttp
 
 if TYPE_CHECKING:
     from trader.executor.executor import Executor
+    from trader.exits.schemas import ExitSignal
     from trader.telemetry.logger import TelemetryLogger
+    from .position_store import PositionStore
     from .proposals import Proposal, ProposalStore
 
 logger = logging.getLogger(__name__)
@@ -131,11 +133,43 @@ class TelegramNotifier:
     # Incoming poller
     # ------------------------------------------------------------------
 
+    async def notify_exit(self, signal: "ExitSignal", order_id: str | None) -> None:
+        """Send an informational exit message (no approval buttons)."""
+        pnl_sign = "+" if signal.pnl_pct >= 0 else ""
+        order_line = f"Order <code>{order_id}</code>" if order_id else "Dry run — no order placed"
+        text = (
+            f"<b>Exit triggered</b>  [{signal.reason.value}]\n"
+            f"\n"
+            f"<b>{signal.ticker}</b>  P&amp;L {pnl_sign}{signal.pnl_pct:.1%}\n"
+            f"Entry <code>{signal.entry_premium}</code>  Exit <code>{signal.current_premium}</code>"
+            f"  DTE {signal.dte_remaining}\n"
+            f"{order_line}"
+        )
+        payload = {
+            "chat_id": self._chat_id,
+            "text": text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+        }
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    _url(self._token, "sendMessage"),
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    body = await resp.json()
+                    if not body.get("ok"):
+                        logger.warning("Telegram exit notify error: %s", body)
+        except Exception as exc:
+            logger.warning("Failed to send exit notification: %s", exc)
+
     async def run_poller(
         self,
-        proposal_store: ProposalStore,
-        executor: Executor,
-        tel: TelemetryLogger | None = None,
+        proposal_store: "ProposalStore",
+        executor: "Executor",
+        tel: "TelemetryLogger | None" = None,
+        position_store: "PositionStore | None" = None,
     ) -> None:
         """Long-poll Telegram getUpdates and handle Approve/Reject callbacks."""
         logger.info("Telegram poller started")
@@ -151,7 +185,7 @@ class TelegramNotifier:
             for update in updates:
                 offset = update["update_id"] + 1
                 try:
-                    await self._handle_update(update, proposal_store, executor, tel)
+                    await self._handle_update(update, proposal_store, executor, tel, position_store)
                 except Exception as exc:
                     logger.error("Error handling Telegram update %d: %s",
                                  update.get("update_id"), exc)
@@ -176,9 +210,10 @@ class TelegramNotifier:
     async def _handle_update(
         self,
         update: dict,
-        proposal_store: ProposalStore,
-        executor: Executor,
-        tel: TelemetryLogger | None,
+        proposal_store: "ProposalStore",
+        executor: "Executor",
+        tel: "TelemetryLogger | None",
+        position_store: "PositionStore | None" = None,
     ) -> None:
         cb = update.get("callback_query")
         if not cb:
@@ -220,22 +255,31 @@ class TelegramNotifier:
 
             t0 = _time.monotonic()
             try:
-                result = await executor.execute(proposal.candidate)
+                result = await executor.execute_approved(proposal.candidate)
                 ms = round((_time.monotonic() - t0) * 1000, 1)
                 if tel:
                     c = proposal.candidate
                     sc = c.selected_contract
-                    lp = sc.mid_price if sc else None
+                    lp = sc.mid if sc else None
                     tel.order_attempt(
                         ticker=c.ticker,
                         mode="rh_approval",
                         action="buy",
-                        quantity=1,
+                        quantity=executor.quantity,
                         limit_price=float(lp) if lp is not None else None,
                         placed=result.placed,
                         order_id=result.order_id,
+                        account_number=executor.account_number or None,
+                        rejection_reason=result.rejection_reason,
+                        review_summary=result.review_summary,
                         duration_ms=ms,
                     )
+                if result.placed and position_store is not None:
+                    from .position_store import make_position
+                    pos = make_position(proposal.candidate, result, executor.quantity)
+                    if pos:
+                        await position_store.add(pos)
+                        logger.info("Position tracked %s position_id=%s", proposal.candidate.ticker, pos.position_id)
                 await proposal_store.mark_executed(proposal_id, result)
                 status_text = "executed" if result.placed else f"rejected — {result.rejection_reason}"
                 await self._edit_message(
@@ -264,7 +308,7 @@ class TelegramNotifier:
         strike = sc.strike if sc else "?"
         expiry = sc.expiry if sc else "?"
         delta = f"{sc.delta:.2f}" if sc and sc.delta is not None else "—"
-        limit = f"${sc.mid_price:.2f}" if sc and sc.mid_price is not None else "—"
+        limit = f"${sc.mid:.2f}" if sc else "—"
 
         status_icons = {
             "pending":   "Awaiting approval",

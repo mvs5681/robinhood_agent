@@ -35,6 +35,7 @@ from trader.uw.validators import parse_flow_alerts
 from .cache import GEXCache
 from .market_hours import is_market_hours
 from .notifier import TelegramNotifier
+from .position_store import PositionStore, make_position
 from .proposals import Proposal, ProposalStore
 
 if TYPE_CHECKING:
@@ -73,6 +74,7 @@ class FlowWatcher:
         tel: TelemetryLogger | None = None,
         poll_interval: int = _POLL_INTERVAL,
         notifier: TelegramNotifier | None = None,
+        position_store: PositionStore | None = None,
     ) -> None:
         self.uw_tools = uw_tools
         self.cache = cache
@@ -91,6 +93,7 @@ class FlowWatcher:
             params=risk_params, portfolio=PortfolioState(), sector_map=sector_map
         )
         self._notifier = notifier
+        self._position_store = position_store
         self._seen: set[str] = set()   # dedup by (ticker, expiry, strike, type, created_at)
 
     async def run(self) -> None:
@@ -240,6 +243,11 @@ class FlowWatcher:
                             review_summary=result.review_summary,
                             duration_ms=ms,
                         )
+                    if result.placed and self._position_store is not None:
+                        pos = make_position(candidate, result, self.executor.quantity)
+                        if pos:
+                            await self._position_store.add(pos)
+                            logger.info("Position tracked %s position_id=%s", ticker, pos.position_id)
                     logger.info(
                         "AUTONOMOUS %s placed=%s order_id=%s",
                         ticker, result.placed, result.order_id,

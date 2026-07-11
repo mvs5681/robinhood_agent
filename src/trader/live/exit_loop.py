@@ -1,0 +1,298 @@
+"""Exit monitor loop — polls open positions every 60 s and auto-sells on trigger.
+
+Exit conditions (checked in priority order):
+  1. Profit target  — underlying spot >= GEX gamma wall stored at entry
+  2. Stop loss      — option premium dropped >= stop_loss_pct from entry
+  3. DTE stop       — days-to-expiry <= dte_floor (default 7)
+
+Exits are always autonomous regardless of EXECUTION_MODE — no approval gate.
+In propose_only mode the sell is logged but not placed.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import time as _time
+from datetime import date
+from decimal import Decimal
+from typing import TYPE_CHECKING
+
+from trader.exits.monitor import ExitMonitor
+from trader.exits.schemas import ExitReason, ExitSignal, Position
+from trader.executor.schemas import ExecutionMode
+
+from .market_hours import is_market_hours
+
+if TYPE_CHECKING:
+    from langchain_core.tools import BaseTool
+    from trader.live.notifier import TelegramNotifier
+    from trader.live.position_store import PositionStore
+    from trader.telemetry.logger import TelemetryLogger
+
+logger = logging.getLogger(__name__)
+
+_POLL_INTERVAL = 60
+_IDLE_SLEEP = 120
+
+
+def _extract_order_id(result: object) -> str | None:
+    if isinstance(result, dict):
+        return result.get("id") or result.get("order_id")
+    return None
+
+
+class ExitLoop:
+    """
+    Async polling loop that evaluates open positions and fires sell_to_close
+    orders automatically when an exit condition triggers.
+    """
+
+    def __init__(
+        self,
+        rh_tools: dict[str, "BaseTool"],
+        position_store: "PositionStore",
+        account_number: str,
+        execution_mode: ExecutionMode,
+        monitor: ExitMonitor | None = None,
+        tel: "TelemetryLogger | None" = None,
+        notifier: "TelegramNotifier | None" = None,
+        poll_interval: int = _POLL_INTERVAL,
+    ) -> None:
+        self._rh_tools = rh_tools
+        self._store = position_store
+        self._account_number = account_number
+        self._mode = execution_mode
+        self._monitor = monitor or ExitMonitor()
+        self._tel = tel
+        self._notifier = notifier
+        self._poll_interval = poll_interval
+
+    async def run(self) -> None:
+        logger.info(
+            "ExitLoop started — stop_loss=%.0f%% dte_floor=%d poll=%ds",
+            self._monitor.stop_loss_pct * 100,
+            self._monitor.dte_floor,
+            self._poll_interval,
+        )
+        while True:
+            if not is_market_hours():
+                await asyncio.sleep(_IDLE_SLEEP)
+                continue
+            await asyncio.sleep(self._poll_interval)
+            try:
+                await self._tick()
+            except Exception as exc:
+                logger.error("ExitLoop tick error: %s", exc)
+
+    # ------------------------------------------------------------------
+    # Polling tick
+    # ------------------------------------------------------------------
+
+    async def _tick(self) -> None:
+        positions = await self._store.all()
+        if not positions:
+            return
+
+        logger.debug("ExitLoop: evaluating %d open position(s)", len(positions))
+
+        tickers = list({p.ticker for p in positions})
+        prices = await self._batch_equity_prices(tickers)
+
+        for pos in positions:
+            try:
+                await self._evaluate(pos, prices)
+            except Exception as exc:
+                logger.error("ExitLoop evaluate %s: %s", pos.ticker, exc)
+
+    async def _evaluate(self, pos: Position, prices: dict[str, Decimal]) -> None:
+        spot = prices.get(pos.ticker)
+        if spot is None:
+            logger.debug("ExitLoop: no spot for %s", pos.ticker)
+            return
+
+        premium, dte = await self._option_mid_and_dte(pos)
+        if premium is None:
+            logger.debug("ExitLoop: no option quote for %s", pos.ticker)
+            return
+
+        signal = self._monitor.evaluate(pos, spot, premium, dte)
+        if signal:
+            logger.info(
+                "Exit triggered %s reason=%s pnl=%.1f%% spot=%s premium=%s dte=%d",
+                pos.ticker, signal.reason.value, signal.pnl_pct * 100, spot, premium, dte,
+            )
+            await self._execute_exit(pos, signal)
+
+    # ------------------------------------------------------------------
+    # Order placement
+    # ------------------------------------------------------------------
+
+    async def _execute_exit(self, pos: Position, signal: ExitSignal) -> None:
+        t0 = _time.monotonic()
+        order_id: str | None = None
+        dry_run = self._mode == ExecutionMode.PROPOSE_ONLY or not self._rh_tools
+
+        if dry_run:
+            logger.info(
+                "PROPOSE_ONLY exit %s reason=%s pnl=%.1f%%",
+                pos.ticker, signal.reason.value, signal.pnl_pct * 100,
+            )
+        else:
+            try:
+                instrument_id = pos.option_instrument_id or await self._resolve_instrument_id(pos)
+                price = self._exit_limit_price(signal)
+                params = {
+                    "account_number": self._account_number,
+                    "quantity": str(pos.quantity),
+                    "legs": [{
+                        "option_id": instrument_id,
+                        "side": "sell",
+                        "position_effect": "close",
+                    }],
+                    "type": "limit",
+                    "time_in_force": "gfd",
+                    "price": f"{float(price):.2f}",
+                    "chain_symbol": pos.ticker,
+                    "underlying_type": "equity",
+                }
+                result = await self._rh_tools["place_option_order"].ainvoke(params)
+                order_id = _extract_order_id(result)
+                logger.info(
+                    "EXIT placed %s reason=%s order_id=%s pnl=%.1f%%",
+                    pos.ticker, signal.reason.value, order_id, signal.pnl_pct * 100,
+                )
+            except Exception as exc:
+                logger.error("Exit order failed %s: %s", pos.ticker, exc)
+                return  # keep position in store — retry next tick
+
+        await self._store.remove(pos.position_id)
+
+        ms = round((_time.monotonic() - t0) * 1000, 1)
+        if self._tel:
+            self._tel.exit_signal(
+                ticker=pos.ticker,
+                position_id=pos.position_id,
+                reason=signal.reason.value,
+                pnl_pct=signal.pnl_pct,
+                dte_remaining=signal.dte_remaining,
+                entry_premium=float(pos.entry_premium),
+                current_premium=float(signal.current_premium),
+                duration_ms=ms,
+            )
+
+        if self._notifier:
+            await self._notifier.notify_exit(signal, order_id)
+
+    def _exit_limit_price(self, signal: ExitSignal) -> Decimal:
+        price = signal.current_premium
+        if signal.reason == ExitReason.STOP_LOSS:
+            # Slightly below mid to improve fill probability under stress
+            return max(price * Decimal("0.95"), Decimal("0.01"))
+        return price
+
+    # ------------------------------------------------------------------
+    # Price helpers
+    # ------------------------------------------------------------------
+
+    async def _batch_equity_prices(self, tickers: list[str]) -> dict[str, Decimal]:
+        if not self._rh_tools or "get_equity_quotes" not in self._rh_tools:
+            return {}
+        try:
+            result = await self._rh_tools["get_equity_quotes"].ainvoke({"symbols": tickers})
+            return self._parse_equity_quotes(result, tickers)
+        except Exception as exc:
+            logger.warning("get_equity_quotes failed: %s", exc)
+            return {}
+
+    def _parse_equity_quotes(self, result: object, tickers: list[str]) -> dict[str, Decimal]:
+        prices: dict[str, Decimal] = {}
+        items: list = []
+        if isinstance(result, list):
+            items = result
+        elif isinstance(result, dict):
+            items = result.get("results", result.get("data", []))
+            if not items:
+                for t in tickers:
+                    v = result.get(t) or result.get(t.lower())
+                    if v is not None:
+                        try:
+                            prices[t] = Decimal(str(v))
+                        except Exception:
+                            pass
+                return prices
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            symbol = (item.get("symbol") or item.get("ticker") or "").upper()
+            raw = (
+                item.get("last_trade_price")
+                or item.get("ask_price")
+                or item.get("bid_price")
+                or item.get("price")
+            )
+            if symbol and raw:
+                try:
+                    prices[symbol] = Decimal(str(raw))
+                except Exception:
+                    pass
+        return prices
+
+    async def _option_mid_and_dte(self, pos: Position) -> tuple[Decimal | None, int]:
+        dte = max((pos.contract.expiry - date.today()).days, 0)
+        if not self._rh_tools or "get_option_quotes" not in self._rh_tools:
+            return None, dte
+        try:
+            instrument_id = pos.option_instrument_id or await self._resolve_instrument_id(pos)
+            result = await self._rh_tools["get_option_quotes"].ainvoke(
+                {"option_ids": [instrument_id]}
+            )
+            mid = self._parse_option_mid(result)
+            return mid, dte
+        except Exception as exc:
+            logger.warning("get_option_quotes failed %s: %s", pos.ticker, exc)
+            return None, dte
+
+    def _parse_option_mid(self, result: object) -> Decimal | None:
+        items: list = []
+        if isinstance(result, list):
+            items = result
+        elif isinstance(result, dict):
+            items = result.get("results", result.get("data", [result]))
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            mid = item.get("mid_price") or item.get("mark_price")
+            if mid is not None:
+                try:
+                    return Decimal(str(mid))
+                except Exception:
+                    pass
+            bid = item.get("bid_price")
+            ask = item.get("ask_price")
+            if bid is not None and ask is not None:
+                try:
+                    return (Decimal(str(bid)) + Decimal(str(ask))) / 2
+                except Exception:
+                    pass
+        return None
+
+    async def _resolve_instrument_id(self, pos: Position) -> str:
+        result = await self._rh_tools["get_option_instruments"].ainvoke({
+            "chain_symbol": pos.contract.ticker,
+            "expiration_dates": pos.contract.expiry.isoformat(),
+            "strike_price": f"{float(pos.contract.strike):.4f}",
+            "type": pos.contract.type,
+            "state": "active",
+        })
+        instruments: list = []
+        if isinstance(result, dict):
+            instruments = result.get("results", result.get("data", []))
+        elif isinstance(result, list):
+            instruments = result
+        if not instruments:
+            raise ValueError(
+                f"No active instrument: {pos.contract.ticker} "
+                f"{pos.contract.expiry} {pos.contract.strike} {pos.contract.type}"
+            )
+        return instruments[0]["id"]

@@ -25,6 +25,8 @@ class Position(BaseModel):
     entry_premium: Decimal      # option mid at entry (per share)
     target_level: Decimal       # GEX gamma wall — underlying price target
     opened_at: datetime
+    quantity: int = 1
+    option_instrument_id: str | None = None   # cached RH instrument UUID
     sector: str | None = None
 
 

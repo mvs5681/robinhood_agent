@@ -90,6 +90,29 @@ class Executor:
         self.rh_tools: dict[str, BaseTool] = rh_tools or {}
         self.quantity = quantity
 
+    async def execute_approved(self, candidate: CandidateSignal) -> OrderResult:
+        """Place a buy that has already been approved by the human (Telegram/dashboard).
+
+        Identical to execute() but skips the LangGraph interrupt — used by the
+        Telegram notifier after the user taps Approve, so the order is placed
+        immediately without re-requesting confirmation inside the graph.
+        """
+        contract = candidate.selected_contract
+        if contract is None:
+            raise ValueError(f"{candidate.ticker}: selected_contract is None")
+        request = OrderRequest(
+            candidate=candidate,
+            action="buy_to_open",
+            quantity=self.quantity,
+            limit_price=contract.mid,
+            mode=self.mode,
+        )
+        self._check_order_type(request.action)
+        if self.mode == ExecutionMode.PROPOSE_ONLY:
+            return self._propose(request)
+        option_id = await self._resolve_option_id(contract)
+        return await self._autonomous(request, option_id)
+
     async def execute(self, candidate: CandidateSignal) -> OrderResult:
         """Entry point — build a buy_to_open request and dispatch to the configured mode."""
         contract = candidate.selected_contract

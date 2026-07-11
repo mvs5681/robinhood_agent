@@ -36,9 +36,12 @@ load_dotenv()
 
 from trader.executor.executor import Executor
 from trader.executor.schemas import ExecutionMode
+from trader.exits.monitor import ExitMonitor
 from trader.live.approval_server import create_app
 from trader.live.cache import GEXCache
+from trader.live.exit_loop import ExitLoop
 from trader.live.notifier import TelegramNotifier
+from trader.live.position_store import PositionStore
 from trader.live.proposals import ProposalStore
 from trader.live.scanner import GEXScanner
 from trader.live.telemetry_reader import TelemetryReader
@@ -103,6 +106,7 @@ async def main() -> None:
 
     cache = GEXCache()
     proposal_store = ProposalStore()
+    position_store = PositionStore()
 
     executor = Executor(
         mode=mode,
@@ -123,6 +127,9 @@ async def main() -> None:
         tel=tel,
     )
 
+    stop_loss_pct = float(os.environ.get("STOP_LOSS_PCT", "0.35"))
+    dte_floor = int(os.environ.get("DTE_FLOOR", "7"))
+
     watcher = FlowWatcher(
         uw_tools=uw_tools,
         cache=cache,
@@ -130,6 +137,17 @@ async def main() -> None:
         execution_mode=mode,
         executor=executor,
         flow_min_premium=flow_min_premium,
+        tel=tel,
+        notifier=notifier,
+        position_store=position_store,
+    )
+
+    exit_loop = ExitLoop(
+        rh_tools=rh_tools,
+        position_store=position_store,
+        account_number=account_number,
+        execution_mode=mode,
+        monitor=ExitMonitor(stop_loss_pct=stop_loss_pct, dte_floor=dte_floor),
         tel=tel,
         notifier=notifier,
     )
@@ -147,9 +165,9 @@ async def main() -> None:
     await site.start()
     logger.info("Approval server listening on :%d", port)
 
-    coroutines = [scanner.run(), watcher.run()]
+    coroutines = [scanner.run(), watcher.run(), exit_loop.run()]
     if notifier:
-        coroutines.append(notifier.run_poller(proposal_store, executor, tel))
+        coroutines.append(notifier.run_poller(proposal_store, executor, tel, position_store))
 
     try:
         await asyncio.gather(*coroutines)

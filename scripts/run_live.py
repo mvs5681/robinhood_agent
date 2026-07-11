@@ -90,10 +90,11 @@ async def main() -> None:
 
     # Load both MCP tool sets concurrently
     logger.info("Connecting to UW and RH MCP servers…")
-    uw_tools_list, rh_tools_list = await asyncio.gather(
-        load_uw_tools(),
-        load_rh_tools() if mode != ExecutionMode.PROPOSE_ONLY else asyncio.coroutine(lambda: [])(),
-    )
+    if mode != ExecutionMode.PROPOSE_ONLY:
+        uw_tools_list, rh_tools_list = await asyncio.gather(load_uw_tools(), load_rh_tools())
+    else:
+        uw_tools_list = await load_uw_tools()
+        rh_tools_list = []
     uw_tools = {t.name: t for t in uw_tools_list}
     rh_tools = {t.name: t for t in rh_tools_list}
     logger.info("UW tools: %s", sorted(uw_tools))

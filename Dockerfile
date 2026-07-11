@@ -5,6 +5,7 @@ WORKDIR /app
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     tzdata \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy package definition first for layer caching

@@ -15,3 +15,7 @@ services:
       timeout: 5s
       retries: 3
       start_period: 15s
+
+# Dashboard is exposed via Tailscale instead of a public tunnel — see README/
+# setup notes: `tailscale serve https / http://localhost:8080` on the host,
+# reachable only from devices on your tailnet.

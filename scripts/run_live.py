@@ -224,12 +224,16 @@ async def main() -> None:
         notifier=notifier,
     )
 
+    dashboard_token = os.environ.get("DASHBOARD_TOKEN", "")
+    if dashboard_token:
+        logger.info("Dashboard token auth enabled — access via /?token=<DASHBOARD_TOKEN>")
     app = create_app(
         proposal_store=proposal_store,
         executor=executor,
         tel=tel,
         telemetry_reader=tel_reader,
         cache=cache,
+        dashboard_token=dashboard_token,
     )
     runner = web.AppRunner(app)
     await runner.setup()

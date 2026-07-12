@@ -23,7 +23,7 @@ from __future__ import annotations
 import json
 import logging
 import time as _time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 from aiohttp import web
 
@@ -809,16 +809,7 @@ document.querySelectorAll('nav.tabs button').forEach(btn => {
 # Dashboard HTML shell
 # ---------------------------------------------------------------------------
 
-_DASHBOARD_HTML = f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>GEX Trading Agent</title>
-  <style>{_CSS}</style>
-</head>
-<body>
-
+_DASHBOARD_BODY = """
 <header>
   <h1>GEX Trading Agent</h1>
   <span id="badge-mode">rh_approval</span>
@@ -876,10 +867,31 @@ _DASHBOARD_HTML = f"""<!DOCTYPE html>
 <!-- Glossary -->
 <button id="glossary-btn">? Glossary</button>
 <div id="glossary-panel"></div>
+"""
 
-<script>{_JS}</script>
-</body>
-</html>"""
+
+def _build_dashboard_html(token: str = "") -> str:
+    """Render the dashboard HTML, optionally injecting a DASHBOARD_TOKEN into all API fetch calls."""
+    token_init = (
+        f"const API_TOKEN={json.dumps(token)};\n"
+        "function apiFetch(url,opts){"
+        "if(!API_TOKEN)return fetch(url,opts);"
+        "const u=new URL(url,location.origin);"
+        'u.searchParams.set("token",API_TOKEN);'
+        "return fetch(u.toString(),opts);}\n"
+    )
+    js = token_init + _JS.replace("fetch(", "apiFetch(")
+    return (
+        '<!DOCTYPE html>\n<html lang="en">\n<head>\n'
+        '  <meta charset="UTF-8">\n'
+        '  <meta name="viewport" content="width=device-width,initial-scale=1">\n'
+        "  <title>GEX Trading Agent</title>\n"
+        f"  <style>{_CSS}</style>\n"
+        "</head>\n<body>\n"
+        f"{_DASHBOARD_BODY}"
+        f"<script>{js}</script>\n"
+        "</body>\n</html>"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -892,10 +904,26 @@ def create_app(
     tel: TelemetryLogger | None = None,
     telemetry_reader: TelemetryReader | None = None,
     cache: GEXCache | None = None,
+    dashboard_token: str = "",
 ) -> web.Application:
     reader = telemetry_reader or TelemetryReader()
 
-    app = web.Application()
+    middlewares: list[Callable] = []
+    if dashboard_token:
+        @web.middleware
+        async def _auth(request: web.Request, handler: Callable) -> web.StreamResponse:
+            if request.path == "/health":
+                return await handler(request)
+            provided = (
+                request.rel_url.query.get("token")
+                or request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
+            )
+            if provided != dashboard_token:
+                return web.Response(status=401, text="Unauthorized")
+            return await handler(request)
+        middlewares.append(_auth)
+
+    app = web.Application(middlewares=middlewares)
 
     # ── Health ──────────────────────────────────────────────────────────
     async def health(req: web.Request) -> web.Response:
@@ -903,7 +931,7 @@ def create_app(
 
     # ── Dashboard ───────────────────────────────────────────────────────
     async def dashboard(req: web.Request) -> web.Response:
-        return web.Response(text=_DASHBOARD_HTML, content_type="text/html")
+        return web.Response(text=_build_dashboard_html(dashboard_token), content_type="text/html")
 
     # ── Proposals ───────────────────────────────────────────────────────
     async def list_proposals(req: web.Request) -> web.Response:

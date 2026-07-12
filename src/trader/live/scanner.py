@@ -75,6 +75,7 @@ class GEXScanner:
         self.detector = GEXDetector(detector_params)
         self.tel = tel
         self.scan_interval = scan_interval
+        self._sem: asyncio.Semaphore | None = None  # created lazily inside event loop
 
     async def run(self) -> None:
         """Main loop — runs forever, sleeping between scans."""
@@ -95,11 +96,12 @@ class GEXScanner:
                 logger.error("GEX scan failed: %s — retry in %d s", exc, _RETRY_INTERVAL)
                 await asyncio.sleep(_RETRY_INTERVAL)
 
-    async def _discover_tickers(self) -> list[str]:
+    async def _discover_tickers(self) -> tuple[list[str], dict[str, Decimal]]:
         """
         Calls get_flow_alerts to find tickers with unusual premium volume.
-        Groups alerts by ticker, sums total_premium, returns the top N above
-        the minimum threshold. Merges with seed_tickers (always included).
+        Returns (tickers, spot_hints) where spot_hints maps ticker → latest
+        underlying_price from flow alerts (used as spot fallback for index
+        tickers that have no darkpool prints).
         """
         t0 = _time.monotonic()
         try:
@@ -107,11 +109,14 @@ class GEXScanner:
             alerts = parse_flow_alerts(raw)
         except Exception as exc:
             logger.error("ticker discovery via get_flow_alerts failed: %s", exc)
-            return self.seed_tickers[:]
+            return self.seed_tickers[:], {}
 
         premium_by_ticker: dict[str, Decimal] = defaultdict(Decimal)
+        spot_hints: dict[str, Decimal] = {}
         for alert in alerts:
             premium_by_ticker[alert.ticker] += alert.total_premium
+            if alert.underlying_price and alert.ticker not in spot_hints:
+                spot_hints[alert.ticker] = alert.underlying_price
 
         # Sort descending by total premium, apply threshold, cap count
         ranked = sorted(premium_by_ticker, key=lambda t: premium_by_ticker[t], reverse=True)
@@ -136,13 +141,13 @@ class GEXScanner:
             if t not in seen:
                 seen.add(t)
                 combined.append(t)
-        return combined
+        return combined, spot_hints
 
     async def _scan(self) -> None:
         t_start = _time.monotonic()
 
         # Discover universe from flow activity this hour
-        tickers = await self._discover_tickers()
+        tickers, spot_hints = await self._discover_tickers()
         logger.info("GEXScanner: scanning %d tickers: %s", len(tickers), tickers)
 
         # Market-wide data
@@ -158,9 +163,9 @@ class GEXScanner:
         except Exception as exc:
             logger.error("market_tide fetch failed: %s", exc)
 
-        # Per-ticker fetches in parallel
+        # Per-ticker fetches in parallel (semaphore inside _scan_ticker limits concurrency)
         snapshots: dict[str, TickerSnapshot] = {}
-        tasks = [self._scan_ticker(t) for t in tickers]
+        tasks = [self._scan_ticker(t, spot_hints.get(t)) for t in tickers]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         for ticker, result in zip(tickers, results):
             if isinstance(result, Exception):
@@ -175,26 +180,30 @@ class GEXScanner:
             _time.monotonic() - t_start,
         )
 
-    async def _scan_ticker(self, ticker: str) -> TickerSnapshot:
+    async def _scan_ticker(self, ticker: str, spot_hint: Decimal | None = None) -> TickerSnapshot:
         snap = TickerSnapshot()
+        # Lazily create semaphore inside the event loop (max 3 concurrent UW calls)
+        if self._sem is None:
+            self._sem = asyncio.Semaphore(3)
 
         async def _fetch(endpoint: str, kwargs: dict, parser):
-            t0 = _time.monotonic()
-            try:
-                raw = await self.uw_tools[endpoint].ainvoke(kwargs)
-                result = parser(raw)
-                ms = round((_time.monotonic() - t0) * 1000, 1)
-                if self.tel:
-                    self.tel.uw_fetch(ticker=ticker, endpoint=endpoint,
-                                      record_count=len(result), duration_ms=ms)
-                return result
-            except Exception as exc:
-                logger.error("%s %s failed: %s", ticker, endpoint, exc)
-                if self.tel:
+            async with self._sem:
+                t0 = _time.monotonic()
+                try:
+                    raw = await self.uw_tools[endpoint].ainvoke(kwargs)
+                    result = parser(raw)
                     ms = round((_time.monotonic() - t0) * 1000, 1)
-                    self.tel.uw_fetch(ticker=ticker, endpoint=endpoint,
-                                      record_count=0, duration_ms=ms, error=str(exc))
-                return []
+                    if self.tel:
+                        self.tel.uw_fetch(ticker=ticker, endpoint=endpoint,
+                                          record_count=len(result), duration_ms=ms)
+                    return result
+                except Exception as exc:
+                    logger.error("%s %s failed: %s", ticker, endpoint, exc)
+                    if self.tel:
+                        ms = round((_time.monotonic() - t0) * 1000, 1)
+                        self.tel.uw_fetch(ticker=ticker, endpoint=endpoint,
+                                          record_count=0, duration_ms=ms, error=str(exc))
+                    return []
 
         snap.spot_gex = await _fetch("get_greek_exposure_by_strike",
                                      {"ticker": ticker}, parse_spot_gex_by_strike)
@@ -216,15 +225,15 @@ class GEXScanner:
         snap.technicals = technicals
 
         # Resolve spot price for GEX detection
-        from decimal import Decimal
         spot: Decimal | None = None
-        # Try darkpool first (most granular), then fall back to option contracts
+        # 1. Darkpool last print — most granular for equities
         if snap.darkpool:
             latest = max(snap.darkpool, key=lambda p: p.executed_at)
             spot = latest.price
-        if spot is None and snap.option_contracts:
-            # Can't reliably get spot from contracts alone; skip detection
-            pass
+        # 2. Flow alert underlying_price — covers index tickers with no darkpool
+        if spot is None and spot_hint is not None:
+            spot = spot_hint
+            logger.debug("%s: using flow-alert spot hint %s", ticker, spot)
 
         # Also check any flow alerts for underlying_price (fetched in watcher)
         # GEX detection can run without spot if unavailable — watcher will retry

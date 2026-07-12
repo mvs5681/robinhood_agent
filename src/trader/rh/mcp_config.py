@@ -20,9 +20,7 @@ import json
 import logging
 import os
 import tempfile
-from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import AsyncIterator
 
 import httpx
 from langchain_core.tools import BaseTool
@@ -147,13 +145,12 @@ async def refresh_rh_token() -> str:
 # MCP client + tool loading
 # ---------------------------------------------------------------------------
 
-@asynccontextmanager
-async def rh_mcp_client(token: str | None = None) -> AsyncIterator[MultiServerMCPClient]:
-    """Context manager that yields an authenticated RH MCP client."""
+async def load_rh_tools(token: str | None = None) -> list[BaseTool]:
+    """Connect to the RH MCP server and return the allowed tools."""
     bearer = token or os.environ.get("RH_ACCESS_TOKEN", "")
     if not bearer:
         raise RuntimeError("RH_ACCESS_TOKEN is not set — call refresh_rh_token() first")
-    async with MultiServerMCPClient(
+    client = MultiServerMCPClient(
         {
             "robinhood": {
                 "url": RH_MCP_URL,
@@ -161,14 +158,8 @@ async def rh_mcp_client(token: str | None = None) -> AsyncIterator[MultiServerMC
                 "headers": {"Authorization": f"Bearer {bearer}"},
             }
         }
-    ) as client:
-        yield client
-
-
-async def load_rh_tools(token: str | None = None) -> list[BaseTool]:
-    """Connect to the RH MCP server and return the allowed tools."""
-    async with rh_mcp_client(token=token) as client:
-        all_tools: list[BaseTool] = client.get_tools()
+    )
+    all_tools: list[BaseTool] = await client.get_tools()
     tools = [t for t in all_tools if t.name in ALLOWED_RH_TOOL_NAMES]
     missing = ALLOWED_RH_TOOL_NAMES - {t.name for t in tools}
     if missing:

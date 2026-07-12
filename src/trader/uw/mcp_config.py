@@ -9,13 +9,11 @@ Auth:      Bearer token in Authorization header + UW-CLIENT-API-ID header
 from __future__ import annotations
 
 import os
-from contextlib import asynccontextmanager
-from typing import AsyncIterator
 
 from langchain_core.tools import BaseTool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 
-UW_MCP_URL = "https://unusualwhales.com/public-api/mcp"
+UW_MCP_URL = "https://mcp.unusualwhales.com"
 
 # Subset of MCP tool names we actually use — keeps the ToolNode small and auditable.
 ALLOWED_TOOL_NAMES: frozenset[str] = frozenset(
@@ -52,10 +50,12 @@ def _uw_headers() -> dict[str, str]:
     }
 
 
-@asynccontextmanager
-async def uw_mcp_client() -> AsyncIterator[MultiServerMCPClient]:
-    """Context manager that yields an authenticated MultiServerMCPClient."""
-    async with MultiServerMCPClient(
+async def load_uw_tools() -> list[BaseTool]:
+    """
+    Connect to the UW MCP server and return only the allowed tools as
+    LangChain BaseTool instances suitable for binding to a LangGraph ToolNode.
+    """
+    client = MultiServerMCPClient(
         {
             "unusualwhales": {
                 "url": UW_MCP_URL,
@@ -63,17 +63,8 @@ async def uw_mcp_client() -> AsyncIterator[MultiServerMCPClient]:
                 "headers": _uw_headers(),
             }
         }
-    ) as client:
-        yield client
-
-
-async def load_uw_tools() -> list[BaseTool]:
-    """
-    Connect to the UW MCP server and return only the allowed tools as
-    LangChain BaseTool instances suitable for binding to a LangGraph ToolNode.
-    """
-    async with uw_mcp_client() as client:
-        all_tools: list[BaseTool] = client.get_tools()
+    )
+    all_tools: list[BaseTool] = await client.get_tools()
 
     allowed = [t for t in all_tools if t.name in ALLOWED_TOOL_NAMES]
 

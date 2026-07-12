@@ -12,6 +12,7 @@ Limitations of reconciled positions:
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import date, datetime, timezone
 from decimal import Decimal
@@ -28,11 +29,25 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _unwrap_mcp(result: object) -> object:
+    """MCP tools return [{'type': 'text', 'text': '<json>'}]. Unwrap to plain object."""
+    if isinstance(result, list) and result and isinstance(result[0], dict) and "text" in result[0]:
+        try:
+            return json.loads(result[0]["text"])
+        except Exception:
+            pass
+    return result
+
+
 def _parse_positions(result: object) -> list[dict]:
+    result = _unwrap_mcp(result)
     if isinstance(result, list):
         return result
     if isinstance(result, dict):
-        return result.get("results", result.get("data", []))
+        inner = result.get("data", result)
+        if isinstance(inner, dict):
+            return inner.get("results", inner.get("positions", []))
+        return result.get("results", result.get("positions", []))
     return []
 
 

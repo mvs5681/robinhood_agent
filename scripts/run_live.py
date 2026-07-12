@@ -22,6 +22,7 @@ Configuration is entirely via environment variables (see .env.example):
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import sys
@@ -66,14 +67,26 @@ def _require(var: str) -> str:
     return val
 
 
+def _unwrap_mcp(result: object) -> object:
+    """MCP tools return [{'type': 'text', 'text': '<json>'}]. Unwrap to plain object."""
+    if isinstance(result, list) and result and isinstance(result[0], dict) and "text" in result[0]:
+        try:
+            return json.loads(result[0]["text"])
+        except Exception:
+            pass
+    return result
+
+
 async def _validate_account(rh_tools: dict, account_number: str) -> None:
     """Assert account is agentic-enabled with options level 2+. Raises on failure."""
-    result = await rh_tools["get_accounts"].ainvoke({})
+    raw = await rh_tools["get_accounts"].ainvoke({})
+    result = _unwrap_mcp(raw)
     accounts: list = []
-    if isinstance(result, list):
+    if isinstance(result, dict):
+        inner = result.get("data", result)
+        accounts = inner.get("accounts", inner.get("results", [inner])) if isinstance(inner, dict) else []
+    elif isinstance(result, list):
         accounts = result
-    elif isinstance(result, dict):
-        accounts = result.get("results", result.get("accounts", [result]))
 
     target = None
     for acct in accounts:

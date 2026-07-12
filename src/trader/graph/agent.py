@@ -124,11 +124,10 @@ async def fetch_ticker_data(
 
     async def _fetch_one(ticker: str) -> None:
         for endpoint, invoke_kwargs, store, parser in [
-            ("get_spot_exposures_by_strike", {"ticker": ticker}, spot_gex, parse_spot_gex_by_strike),
-            ("get_darkpool_ticker",          {"ticker": ticker}, darkpool, parse_darkpool_prints),
-            ("get_net_prem_ticks",           {"ticker": ticker}, net_prem_ticks, parse_net_prem_ticks),
-            ("get_option_contracts",         {"ticker": ticker}, option_contracts, parse_option_contracts),
-            ("get_interpolated_iv",          {"ticker": ticker}, interpolated_iv, parse_interpolated_iv),
+            ("get_greek_exposure_by_strike", {"ticker": ticker}, spot_gex, parse_spot_gex_by_strike),
+            ("get_dark_pool_trades",         {"ticker_symbol": ticker, "limit": 100}, darkpool, parse_darkpool_prints),
+            ("get_flow_per_strike",          {"ticker": ticker}, net_prem_ticks, parse_net_prem_ticks),
+            ("get_options_chain",            {"ticker": ticker, "limit": 50}, option_contracts, parse_option_contracts),
         ]:
             t0 = time.monotonic()
             try:
@@ -151,21 +150,21 @@ async def fetch_ticker_data(
         for fn in ("RSI", "MACD"):
             t0 = time.monotonic()
             try:
-                raw_tech = await tools["get_technical_indicator"].ainvoke(
+                raw_tech = await tools["get_extended_technical_indicator"].ainvoke(
                     {"ticker": ticker, "function": fn, "interval": "daily"}
                 )
                 ticker_technicals[fn] = parse_technical_indicator(raw_tech, fn)
                 count = len(ticker_technicals[fn])
                 logger.info("%s %s: %d points", ticker, fn, count)
                 if tel:
-                    tel.uw_fetch(ticker=ticker, endpoint=f"get_technical_indicator/{fn}",
+                    tel.uw_fetch(ticker=ticker, endpoint=f"get_extended_technical_indicator/{fn}",
                                  record_count=count,
                                  duration_ms=round((time.monotonic() - t0) * 1000, 1))
             except Exception as exc:
                 logger.error("%s %s failed: %s", ticker, fn, exc)
                 errors.append(f"{ticker}.{fn}: {exc}")
                 if tel:
-                    tel.uw_fetch(ticker=ticker, endpoint=f"get_technical_indicator/{fn}",
+                    tel.uw_fetch(ticker=ticker, endpoint=f"get_extended_technical_indicator/{fn}",
                                  record_count=0,
                                  duration_ms=round((time.monotonic() - t0) * 1000, 1),
                                  error=str(exc))

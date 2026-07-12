@@ -196,21 +196,19 @@ class GEXScanner:
                                       record_count=0, duration_ms=ms, error=str(exc))
                 return []
 
-        snap.spot_gex = await _fetch("get_spot_exposures_by_strike",
+        snap.spot_gex = await _fetch("get_greek_exposure_by_strike",
                                      {"ticker": ticker}, parse_spot_gex_by_strike)
-        snap.darkpool = await _fetch("get_darkpool_ticker",
-                                     {"ticker": ticker}, parse_darkpool_prints)
-        snap.net_prem_ticks = await _fetch("get_net_prem_ticks",
+        snap.darkpool = await _fetch("get_dark_pool_trades",
+                                     {"ticker_symbol": ticker, "limit": 100}, parse_darkpool_prints)
+        snap.net_prem_ticks = await _fetch("get_flow_per_strike",
                                            {"ticker": ticker}, parse_net_prem_ticks)
-        snap.option_contracts = await _fetch("get_option_contracts",
-                                             {"ticker": ticker}, parse_option_contracts)
-        snap.interpolated_iv = await _fetch("get_interpolated_iv",
-                                            {"ticker": ticker}, parse_interpolated_iv)
+        snap.option_contracts = await _fetch("get_options_chain",
+                                             {"ticker": ticker, "limit": 50}, parse_option_contracts)
 
         technicals: dict = {}
         for fn in ("RSI", "MACD"):
             rows = await _fetch(
-                "get_technical_indicator",
+                "get_extended_technical_indicator",
                 {"ticker": ticker, "function": fn, "interval": "daily"},
                 lambda raw, f=fn: parse_technical_indicator(raw, f),
             )

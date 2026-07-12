@@ -13,28 +13,24 @@ import os
 from langchain_core.tools import BaseTool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 
-UW_MCP_URL = "https://mcp.unusualwhales.com"
+UW_MCP_URL = "https://api.unusualwhales.com/api/mcp"
 
 # Subset of MCP tool names we actually use — keeps the ToolNode small and auditable.
 ALLOWED_TOOL_NAMES: frozenset[str] = frozenset(
     [
         # Flow
         "get_flow_alerts",
-        "get_stock_flow_alerts",
+        "get_flow_per_strike",
         # GEX
-        "get_spot_exposures_by_strike",
         "get_greek_exposure_by_strike",
         # Market-wide
         "get_market_tide",
         # Ticker data
-        "get_darkpool_ticker",
-        "get_net_prem_ticks",
-        "get_option_contracts",
-        "get_greeks",
-        "get_interpolated_iv",
-        "get_technical_indicator",
+        "get_dark_pool_trades",
+        "get_options_chain",
+        "get_extended_technical_indicator",
         # Screener
-        "get_option_contracts_screener",
+        "get_options_screener",
     ]
 )
 

@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 from trader.exits.monitor import ExitMonitor
 from trader.exits.schemas import ExitReason, ExitSignal, Position
 from trader.executor.schemas import ExecutionMode
+from trader.rh.mcp_config import rh_call
 
 from .market_hours import is_market_hours
 
@@ -156,7 +157,7 @@ class ExitLoop:
                     "chain_symbol": pos.ticker,
                     "underlying_type": "equity",
                 }
-                result = await self._rh_tools["place_option_order"].ainvoke(params)
+                result = await rh_call(self._rh_tools, "place_option_order", params)
                 order_id = _extract_order_id(result)
                 logger.info(
                     "EXIT placed %s reason=%s order_id=%s pnl=%.1f%%",
@@ -199,7 +200,7 @@ class ExitLoop:
         if not self._rh_tools or "get_equity_quotes" not in self._rh_tools:
             return {}
         try:
-            result = await self._rh_tools["get_equity_quotes"].ainvoke({"symbols": tickers})
+            result = await rh_call(self._rh_tools, "get_equity_quotes", {"symbols": tickers})
             return self._parse_equity_quotes(result, tickers)
         except Exception as exc:
             logger.warning("get_equity_quotes failed: %s", exc)
@@ -244,9 +245,8 @@ class ExitLoop:
             return None, dte
         try:
             instrument_id = pos.option_instrument_id or await self._resolve_instrument_id(pos)
-            result = await self._rh_tools["get_option_quotes"].ainvoke(
-                {"option_ids": [instrument_id]}
-            )
+            result = await rh_call(self._rh_tools, "get_option_quotes",
+                                   {"option_ids": [instrument_id]})
             mid = self._parse_option_mid(result)
             return mid, dte
         except Exception as exc:
@@ -278,7 +278,7 @@ class ExitLoop:
         return None
 
     async def _resolve_instrument_id(self, pos: Position) -> str:
-        result = await self._rh_tools["get_option_instruments"].ainvoke({
+        result = await rh_call(self._rh_tools, "get_option_instruments", {
             "chain_symbol": pos.contract.ticker,
             "expiration_dates": pos.contract.expiry.isoformat(),
             "strike_price": f"{float(pos.contract.strike):.4f}",

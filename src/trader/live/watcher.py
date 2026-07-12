@@ -153,7 +153,7 @@ class FlowWatcher:
         """Return alerts we haven't processed yet, for tickers we watch."""
         new = []
         for a in alerts:
-            if a.ticker not in self.tickers:
+            if a.ticker not in self.cache.tickers:
                 continue
             key = self._alert_key(a)
             if key not in self._seen:
@@ -168,6 +168,10 @@ class FlowWatcher:
         snap = await self.cache.snapshot(ticker)
         if snap is None or snap.gex_setup is None:
             logger.debug("%s: no GEX setup in cache, skipping", ticker)
+            return
+        if snap.is_stale:
+            logger.warning("%s: GEX cache stale (refreshed_at=%s), skipping pipeline",
+                           ticker, snap.refreshed_at.isoformat())
             return
 
         # Unique ID linking all telemetry events for this pipeline run

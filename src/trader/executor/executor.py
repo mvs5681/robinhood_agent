@@ -18,6 +18,7 @@ from typing import Any
 from langchain_core.tools import BaseTool
 from langgraph.types import interrupt
 
+from trader.rh.mcp_config import rh_call
 from trader.scoring.schemas import CandidateSignal
 from trader.uw.schemas import OptionContract
 
@@ -184,7 +185,7 @@ class Executor:
 
     async def _resolve_option_id(self, contract: OptionContract) -> str:
         """Resolve the RH option instrument UUID from contract fields."""
-        result = await self.rh_tools["get_option_instruments"].ainvoke({
+        result = await rh_call(self.rh_tools, "get_option_instruments", {
             "chain_symbol": contract.ticker,
             "expiration_dates": contract.expiry.isoformat(),
             "strike_price": f"{float(contract.strike):.4f}",
@@ -220,6 +221,7 @@ class Executor:
         if contract is not None:
             params["chain_symbol"] = contract.ticker
             params["underlying_type"] = "equity"
+        params["ref_id"] = request.ref_id
         return params
 
     async def _rh_approval(self, request: OrderRequest, option_id: str) -> OrderResult:
@@ -232,7 +234,7 @@ class Executor:
         """
         params = self._build_order_params(request, option_id)
 
-        review_result = await self.rh_tools["review_option_order"].ainvoke(params)
+        review_result = await rh_call(self.rh_tools, "review_option_order", params)
         review_summary = _summarize_review(review_result)
         logger.info("%s rh_approval review: %s", request.candidate.ticker, review_summary)
 
@@ -258,7 +260,7 @@ class Executor:
                 timestamp=datetime.now(timezone.utc),
             )
 
-        place_result = await self.rh_tools["place_option_order"].ainvoke(params)
+        place_result = await rh_call(self.rh_tools, "place_option_order", params)
         order_id = _extract_order_id(place_result)
         logger.info("%s placed order_id=%s", request.candidate.ticker, order_id)
         return OrderResult(
@@ -276,7 +278,7 @@ class Executor:
         """
         params = self._build_order_params(request, option_id)
 
-        review_result = await self.rh_tools["review_option_order"].ainvoke(params)
+        review_result = await rh_call(self.rh_tools, "review_option_order", params)
         review_summary = _summarize_review(review_result)
 
         blocking = _get_blocking_alerts(review_result)
@@ -290,7 +292,7 @@ class Executor:
                 timestamp=datetime.now(timezone.utc),
             )
 
-        place_result = await self.rh_tools["place_option_order"].ainvoke(params)
+        place_result = await rh_call(self.rh_tools, "place_option_order", params)
         order_id = _extract_order_id(place_result)
         logger.info("%s autonomous placed order_id=%s", request.candidate.ticker, order_id)
         return OrderResult(

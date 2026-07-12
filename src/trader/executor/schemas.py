@@ -4,8 +4,9 @@ from datetime import datetime
 from decimal import Decimal
 from enum import Enum
 from typing import Literal
+from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from trader.scoring.schemas import CandidateSignal
 
@@ -24,6 +25,7 @@ class OrderRequest(BaseModel):
     quantity: int
     limit_price: Decimal | None  # None = market; always set a limit for options
     mode: ExecutionMode
+    ref_id: str = Field(default_factory=lambda: str(uuid4()))
 
 
 class OrderResult(BaseModel):

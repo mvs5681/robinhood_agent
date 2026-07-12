@@ -22,8 +22,8 @@ class Position(BaseModel):
     position_id: str
     ticker: str
     contract: OptionContract
-    entry_premium: Decimal      # option mid at entry (per share)
-    target_level: Decimal       # GEX gamma wall — underlying price target
+    entry_premium: Decimal          # option mid at entry (per share)
+    target_level: Decimal | None    # GEX gamma wall — None for reconciled positions
     opened_at: datetime
     quantity: int = 1
     option_instrument_id: str | None = None   # cached RH instrument UUID

@@ -3,15 +3,25 @@
 Connects to https://agent.robinhood.com/mcp/trading using a Bearer token
 obtained via the OAuth 2.0 authorization-code + PKCE flow (see scripts/auth_robinhood.py).
 
-Token refresh is handled automatically: if RH_REFRESH_TOKEN is set and the
-access token is expired, a new access token is fetched silently before connecting.
+Token lifecycle:
+- At startup, always exchange RH_REFRESH_TOKEN for a fresh access token.
+  RH_ACCESS_TOKEN in .env is not trusted — it may be stale.
+- After each refresh, tokens are written to TOKEN_FILE (default
+  /app/logs/rh_tokens.json on the mounted volume) so the next container
+  restart uses up-to-date credentials.
+- Mid-session 401s trigger reload_rh_tools(), which refreshes, saves, and
+  reloads the tool dict in-place so both Executor and ExitLoop get fresh tools
+  without any additional wiring.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import tempfile
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import AsyncIterator
 
 import httpx
@@ -23,6 +33,8 @@ logger = logging.getLogger(__name__)
 RH_MCP_URL = "https://agent.robinhood.com/mcp/trading"
 RH_TOKEN_URL = "https://api.robinhood.com/oauth2/token/"
 
+TOKEN_FILE = Path(os.environ.get("TOKEN_FILE", "/app/logs/rh_tokens.json"))
+
 ALLOWED_RH_TOOL_NAMES: frozenset[str] = frozenset([
     "get_option_instruments",
     "review_option_order",
@@ -31,25 +43,80 @@ ALLOWED_RH_TOOL_NAMES: frozenset[str] = frozenset([
     "get_accounts",
     "get_option_positions",
     "get_portfolio",
+    "get_equity_quotes",
+    "get_option_quotes",
 ])
 
 
-def _rh_access_token() -> str:
-    token = os.environ.get("RH_ACCESS_TOKEN", "")
-    if not token:
-        raise RuntimeError("RH_ACCESS_TOKEN env var is not set — run scripts/auth_robinhood.py")
-    return token
+# ---------------------------------------------------------------------------
+# Token file helpers
+# ---------------------------------------------------------------------------
 
+def load_token_file() -> dict:
+    """Return stored tokens from TOKEN_FILE, or {} if the file doesn't exist."""
+    try:
+        return json.loads(TOKEN_FILE.read_text())
+    except FileNotFoundError:
+        return {}
+    except Exception as exc:
+        logger.warning("Could not read token file %s: %s", TOKEN_FILE, exc)
+        return {}
+
+
+def save_token_file(access_token: str, refresh_token: str, client_id: str) -> None:
+    """Atomically write tokens to TOKEN_FILE (write temp + rename)."""
+    data = {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "client_id": client_id,
+    }
+    try:
+        TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(dir=TOKEN_FILE.parent, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump(data, f)
+            Path(tmp_path).replace(TOKEN_FILE)
+        except Exception:
+            os.unlink(tmp_path)
+            raise
+        logger.debug("RH tokens saved to %s", TOKEN_FILE)
+    except Exception as exc:
+        logger.warning("Could not save token file %s: %s", TOKEN_FILE, exc)
+
+
+# ---------------------------------------------------------------------------
+# Token refresh
+# ---------------------------------------------------------------------------
 
 async def refresh_rh_token() -> str:
     """
-    Exchange RH_REFRESH_TOKEN for a new access token and update the env var.
-    Returns the new access token. Raises if RH_REFRESH_TOKEN is not set.
+    Exchange RH_REFRESH_TOKEN for a fresh access token.
+
+    Resolution order for refresh_token and client_id:
+      1. TOKEN_FILE (written by previous refresh — most up-to-date)
+      2. Environment variables (initial bootstrap)
+
+    After a successful refresh, saves new tokens to TOKEN_FILE and updates
+    os.environ so the current process uses them immediately.
+
+    Returns the new access token.
     """
-    refresh_token = os.environ.get("RH_REFRESH_TOKEN", "")
-    client_id = os.environ.get("RH_CLIENT_ID", "")
+    stored = load_token_file()
+
+    refresh_token = (
+        stored.get("refresh_token")
+        or os.environ.get("RH_REFRESH_TOKEN", "")
+    )
+    client_id = (
+        stored.get("client_id")
+        or os.environ.get("RH_CLIENT_ID", "")
+    )
+
     if not refresh_token:
-        raise RuntimeError("RH_REFRESH_TOKEN is not set — re-run scripts/auth_robinhood.py")
+        raise RuntimeError(
+            "RH_REFRESH_TOKEN is not set — run scripts/auth_robinhood.py first"
+        )
 
     async with httpx.AsyncClient() as client:
         resp = await client.post(
@@ -60,23 +127,32 @@ async def refresh_rh_token() -> str:
                 "client_id": client_id,
             },
             headers={"Content-Type": "application/x-www-form-urlencoded"},
+            timeout=15,
         )
         resp.raise_for_status()
         data = resp.json()
 
-    new_token = data["access_token"]
-    os.environ["RH_ACCESS_TOKEN"] = new_token
-    if "refresh_token" in data:
-        os.environ["RH_REFRESH_TOKEN"] = data["refresh_token"]
+    new_access = data["access_token"]
+    new_refresh = data.get("refresh_token", refresh_token)
 
-    logger.info("RH token refreshed successfully")
-    return new_token
+    os.environ["RH_ACCESS_TOKEN"] = new_access
+    os.environ["RH_REFRESH_TOKEN"] = new_refresh
 
+    save_token_file(new_access, new_refresh, client_id)
+    logger.info("RH token refreshed and saved to %s", TOKEN_FILE)
+    return new_access
+
+
+# ---------------------------------------------------------------------------
+# MCP client + tool loading
+# ---------------------------------------------------------------------------
 
 @asynccontextmanager
 async def rh_mcp_client(token: str | None = None) -> AsyncIterator[MultiServerMCPClient]:
     """Context manager that yields an authenticated RH MCP client."""
-    bearer = token or _rh_access_token()
+    bearer = token or os.environ.get("RH_ACCESS_TOKEN", "")
+    if not bearer:
+        raise RuntimeError("RH_ACCESS_TOKEN is not set — call refresh_rh_token() first")
     async with MultiServerMCPClient(
         {
             "robinhood": {
@@ -90,28 +166,45 @@ async def rh_mcp_client(token: str | None = None) -> AsyncIterator[MultiServerMC
 
 
 async def load_rh_tools(token: str | None = None) -> list[BaseTool]:
-    """
-    Connect to the RH MCP server and return the allowed tools.
-    If the connection fails with a 401, attempts one token refresh and retries.
-    """
-    async def _load(t: str) -> list[BaseTool]:
-        async with rh_mcp_client(token=t) as client:
-            all_tools: list[BaseTool] = client.get_tools()
-        return [tool for tool in all_tools if tool.name in ALLOWED_RH_TOOL_NAMES]
-
-    bearer = token or _rh_access_token()
-    try:
-        tools = await _load(bearer)
-    except Exception as exc:
-        if "401" in str(exc) or "unauthorized" in str(exc).lower():
-            logger.warning("RH token expired, attempting refresh…")
-            bearer = await refresh_rh_token()
-            tools = await _load(bearer)
-        else:
-            raise
-
+    """Connect to the RH MCP server and return the allowed tools."""
+    async with rh_mcp_client(token=token) as client:
+        all_tools: list[BaseTool] = client.get_tools()
+    tools = [t for t in all_tools if t.name in ALLOWED_RH_TOOL_NAMES]
     missing = ALLOWED_RH_TOOL_NAMES - {t.name for t in tools}
     if missing:
         logger.warning("RH MCP did not expose expected tools: %s", missing)
-
     return tools
+
+
+async def reload_rh_tools(rh_tools: dict[str, BaseTool]) -> None:
+    """
+    Refresh the RH OAuth token, reload tools, and update rh_tools in-place.
+
+    Both Executor and ExitLoop hold a reference to the same dict object, so
+    updating it in-place propagates to both without any additional wiring.
+    Called automatically by _rh_call() when a 401 is detected mid-session.
+    """
+    await refresh_rh_token()
+    new_tools = await load_rh_tools()
+    rh_tools.clear()
+    rh_tools.update({t.name: t for t in new_tools})
+    logger.info("RH tools reloaded (%d tools)", len(rh_tools))
+
+
+# ---------------------------------------------------------------------------
+# Retry helper
+# ---------------------------------------------------------------------------
+
+async def rh_call(rh_tools: dict[str, BaseTool], name: str, params: dict):
+    """
+    Call an RH MCP tool by name, retrying once after a token refresh on 401.
+    Use this instead of rh_tools[name].ainvoke(params) directly.
+    """
+    try:
+        return await rh_tools[name].ainvoke(params)
+    except Exception as exc:
+        if "401" in str(exc) or "unauthorized" in str(exc).lower():
+            logger.warning("RH 401 on %s — refreshing token and retrying", name)
+            await reload_rh_tools(rh_tools)
+            return await rh_tools[name].ainvoke(params)
+        raise

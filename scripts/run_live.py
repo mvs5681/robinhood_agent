@@ -43,10 +43,11 @@ from trader.live.exit_loop import ExitLoop
 from trader.live.notifier import TelegramNotifier
 from trader.live.position_store import PositionStore
 from trader.live.proposals import ProposalStore
+from trader.live.reconciler import reconcile_positions
 from trader.live.scanner import GEXScanner
 from trader.live.telemetry_reader import TelemetryReader
 from trader.live.watcher import FlowWatcher
-from trader.rh.mcp_config import load_rh_tools
+from trader.rh.mcp_config import load_rh_tools, refresh_rh_token
 from trader.telemetry.logger import TelemetryLogger
 from trader.uw.mcp_config import load_uw_tools
 
@@ -63,6 +64,46 @@ def _require(var: str) -> str:
     if not val:
         raise RuntimeError(f"Required env var {var!r} is not set")
     return val
+
+
+async def _validate_account(rh_tools: dict, account_number: str) -> None:
+    """Assert account is agentic-enabled with options level 2+. Raises on failure."""
+    result = await rh_tools["get_accounts"].ainvoke({})
+    accounts: list = []
+    if isinstance(result, list):
+        accounts = result
+    elif isinstance(result, dict):
+        accounts = result.get("results", result.get("accounts", [result]))
+
+    target = None
+    for acct in accounts:
+        if isinstance(acct, dict) and acct.get("account_number") == account_number:
+            target = acct
+            break
+
+    if target is None:
+        raise RuntimeError(
+            f"Account {account_number!r} not found in get_accounts response. "
+            "Check RH_ACCOUNT_NUMBER."
+        )
+
+    if not target.get("agentic_allowed", False):
+        raise RuntimeError(
+            f"Account {account_number!r} has agentic_allowed=False. "
+            "Enable agentic trading in the Robinhood app before running."
+        )
+
+    option_level: str = target.get("option_level", "") or ""
+    if option_level not in ("option_level_2", "option_level_3"):
+        raise RuntimeError(
+            f"Account {account_number!r} has option_level={option_level!r}. "
+            "Options level 2 or 3 required — enroll in the Robinhood app."
+        )
+
+    logger.info(
+        "Account validated: %s agentic_allowed=True option_level=%s",
+        account_number, option_level,
+    )
 
 
 async def main() -> None:
@@ -91,6 +132,13 @@ async def main() -> None:
     else:
         logger.info("TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set — notifications disabled")
 
+    # Always exchange refresh token for a fresh access token before connecting.
+    # RH_ACCESS_TOKEN in .env may be stale; the token file on the mounted volume
+    # is preferred and updated after each refresh.
+    if mode != ExecutionMode.PROPOSE_ONLY:
+        logger.info("Refreshing RH OAuth token…")
+        await refresh_rh_token()
+
     # Load both MCP tool sets concurrently
     logger.info("Connecting to UW and RH MCP servers…")
     if mode != ExecutionMode.PROPOSE_ONLY:
@@ -99,10 +147,16 @@ async def main() -> None:
         uw_tools_list = await load_uw_tools()
         rh_tools_list = []
     uw_tools = {t.name: t for t in uw_tools_list}
-    rh_tools = {t.name: t for t in rh_tools_list}
+    # rh_tools is a shared mutable dict — Executor and ExitLoop both hold a reference.
+    # reload_rh_tools() updates it in-place on mid-session 401s.
+    rh_tools: dict = {t.name: t for t in rh_tools_list}
     logger.info("UW tools: %s", sorted(uw_tools))
     if rh_tools:
         logger.info("RH tools: %s", sorted(rh_tools))
+
+    # Validate account capabilities before accepting any traffic
+    if account_number and rh_tools:
+        await _validate_account(rh_tools, account_number)
 
     cache = GEXCache()
     proposal_store = ProposalStore()
@@ -169,6 +223,10 @@ async def main() -> None:
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
     logger.info("Approval server listening on :%d", port)
+
+    # Reconcile any open positions from before this container started
+    if mode != ExecutionMode.PROPOSE_ONLY and account_number and rh_tools:
+        await reconcile_positions(rh_tools, position_store, account_number)
 
     coroutines = [scanner.run(), watcher.run(), exit_loop.run()]
     if notifier:

@@ -62,7 +62,7 @@ class ExitMonitor:
         current_premium: Decimal,
         dte: int,
     ) -> ExitReason | None:
-        if current_price >= position.target_level:
+        if position.target_level is not None and current_price >= position.target_level:
             return ExitReason.PROFIT_TARGET
 
         pnl_ratio = (current_premium - position.entry_premium) / position.entry_premium

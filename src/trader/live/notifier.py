@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 _BASE = "https://api.telegram.org/bot{token}/{method}"
 _LONG_POLL_TIMEOUT = 30   # seconds for getUpdates long-poll
 _RETRY_SLEEP = 5          # seconds to wait after a network error
+_STARTUP_KEY = "__startup_check__"
 
 
 def _url(token: str, method: str) -> str:
@@ -57,6 +58,48 @@ class TelegramNotifier:
     # ------------------------------------------------------------------
     # Outgoing
     # ------------------------------------------------------------------
+
+    async def send_startup_check(self) -> bool:
+        """
+        Send a startup connectivity test with Approve/Reject buttons.
+        Returns True if the message was delivered successfully.
+        The poller handles the button tap and edits the message in-place.
+        """
+        text = (
+            "<b>GEX Agent — Startup Check</b>\n"
+            "\n"
+            "All systems connected. Tap <b>OK</b> to confirm Telegram is working\n"
+            "or <b>Dismiss</b> to close this message."
+        )
+        keyboard = {
+            "inline_keyboard": [[
+                {"text": "✓ OK",      "callback_data": "startup_check:ok"},
+                {"text": "Dismiss",   "callback_data": "startup_check:dismiss"},
+            ]]
+        }
+        payload = {
+            "chat_id": self._chat_id,
+            "text": text,
+            "parse_mode": "HTML",
+            "reply_markup": keyboard,
+        }
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    _url(self._token, "sendMessage"),
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    body = await resp.json()
+                    if body.get("ok"):
+                        self._msg_ids[_STARTUP_KEY] = body["result"]["message_id"]
+                        logger.info("Telegram startup check sent — tap OK or Dismiss to confirm")
+                        return True
+                    logger.warning("Telegram startup check failed: %s", body)
+                    return False
+        except Exception as exc:
+            logger.warning("Telegram startup check failed: %s", exc)
+            return False
 
     async def notify_proposal(self, proposal: Proposal) -> None:
         """Send notification message with Approve / Reject inline buttons."""
@@ -226,7 +269,22 @@ class TelegramNotifier:
             await self._answer_callback(cb_id, "Unknown action")
             return
 
-        action, proposal_id = data.split(":", 1)
+        action, payload_id = data.split(":", 1)
+
+        if action == "startup_check":
+            confirmed = payload_id == "ok"
+            toast = "✓ Confirmed — agent is live and ready." if confirmed else "Dismissed."
+            await self._answer_callback(cb_id, toast)
+            body_text = (
+                "<b>GEX Agent — Startup Check</b>\n\n"
+                + ("✓ Telegram confirmed. Agent is live and ready to trade." if confirmed
+                   else "Dismissed.")
+            )
+            await self._edit_message(_STARTUP_KEY, body_text)
+            logger.info("Telegram startup check %s", "confirmed" if confirmed else "dismissed")
+            return
+
+        proposal_id = payload_id
 
         if action == "reject":
             proposal = await proposal_store.reject(proposal_id, note="Rejected via Telegram")

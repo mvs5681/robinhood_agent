@@ -241,6 +241,11 @@ async def main() -> None:
     if mode != ExecutionMode.PROPOSE_ONLY and account_number and rh_tools:
         await reconcile_positions(rh_tools, position_store, account_number)
 
+    # Telegram startup check — sends a test Approve/Reject message so the user
+    # can confirm the bot is reachable and interactive before any real trades fire.
+    if notifier:
+        await notifier.send_startup_check()
+
     coroutines = [scanner.run(), watcher.run(), exit_loop.run()]
     if notifier:
         coroutines.append(notifier.run_poller(proposal_store, executor, tel, position_store))

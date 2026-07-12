@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 
 _SCAN_INTERVAL = 3600   # 1 hour between full scans
 _RETRY_INTERVAL = 300   # 5 min retry after a scan error
-_DEFAULT_MIN_PREMIUM = Decimal("500_000")   # $500K minimum premium to discover a ticker
+_DEFAULT_MIN_PREMIUM = Decimal("250_000")   # $250K minimum premium to discover a ticker
 _DEFAULT_MAX_TICKERS = 20                   # cap parallel fetches per scan cycle
 
 

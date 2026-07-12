@@ -187,7 +187,7 @@ async def main() -> None:
         max_contracts=int(os.environ.get("MAX_CONTRACTS", "20")),
     )
 
-    discovery_min_premium = Decimal(os.environ.get("DISCOVERY_MIN_PREMIUM", "500000"))
+    discovery_min_premium = Decimal(os.environ.get("DISCOVERY_MIN_PREMIUM", "250000"))
     max_discovered_tickers = int(os.environ.get("MAX_DISCOVERED_TICKERS", "20"))
 
     scanner = GEXScanner(

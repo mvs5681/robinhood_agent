@@ -160,11 +160,44 @@ cp .env.example .env
 python scripts/run_live.py
 
 # Docker
-docker compose up --build
+docker compose up -d --build
 
 # Preview dashboard with fake data
 python scripts/demo_dashboard.py
 ```
+
+**One-time host setup** if `docker` / `docker compose` aren't ready yet:
+
+```bash
+# Run containers without sudo
+sudo usermod -aG docker $USER
+# then fully log out/in (or `newgrp docker` in the current shell only)
+
+# Compose v2 plugin, if `docker compose version` fails
+sudo apt-get update && sudo apt-get install -y docker-compose-plugin docker-buildx-plugin
+```
+
+**Common Docker commands:**
+
+```bash
+docker compose up -d --build   # build image and start in the background
+docker compose logs -f agent   # tail logs
+docker compose ps              # check container status/health
+docker compose restart agent   # restart after an .env change
+docker compose down            # stop and remove the container
+curl -s http://localhost:8080/health   # quick health check
+```
+
+### 6. Expose the dashboard with Tailscale (private, no public tunnel)
+
+```bash
+sudo snap install tailscale
+sudo tailscale up                                     # opens a browser link to authorize this device
+sudo tailscale serve https / http://localhost:8080    # proxy the dashboard over your tailnet
+tailscale serve status                                # prints https://<host>.<tailnet>.ts.net/
+```
+
+Set `PUBLIC_URL` in `.env` to that `https://<host>.<tailnet>.ts.net/` URL, then any device signed into the same tailnet (e.g. the Tailscale phone app) can open it directly — no public exposure, no token required. `docker compose` itself doesn't need changes for this; Tailscale runs at the host level and proxies to the port already published by the `agent` service.
 
 ---
 

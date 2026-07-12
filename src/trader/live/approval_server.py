@@ -215,6 +215,21 @@ tr:last-child td { border-bottom:none; }
 ::-webkit-scrollbar-track { background:var(--bg); }
 ::-webkit-scrollbar-thumb { background:var(--border); border-radius:3px; }
 [data-tip] { cursor:help; border-bottom:1px dashed var(--muted); }
+
+/* ── P&L tab ── */
+.pnl-stats-row { display:flex; gap:12px; flex-wrap:wrap; margin-bottom:20px; }
+.stat-card { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius);
+             padding:14px 20px; min-width:120px; }
+.stat-card .stat-label { font-size:11px; color:var(--muted); text-transform:uppercase;
+                         letter-spacing:.06em; margin-bottom:4px; }
+.stat-card .stat-value { font-size:22px; font-weight:700; }
+.stat-card .stat-value.pos { color:var(--green); }
+.stat-card .stat-value.neg { color:var(--red); }
+.stat-card .stat-value.neu { color:var(--text); }
+.pnl-chart-outer { background:var(--surface); border:1px solid var(--border);
+                   border-radius:var(--radius); padding:16px; overflow-x:auto; }
+.pnl-chart-title { font-size:12px; color:var(--muted); margin-bottom:12px; }
+.pnl-table-wrap { max-height:360px; overflow-y:auto; margin-top:20px; }
 """
 
 # ---------------------------------------------------------------------------
@@ -632,6 +647,120 @@ async function loadOverview() {
   document.getElementById('ov-total').textContent= d.total || 0;
 }
 
+// ── P&L tab ───────────────────────────────────────────────────────────
+async function loadPnl() {
+  const data = await fetch('/api/telemetry/pnl').then(r=>r.json());
+  renderPnlStats(data);
+  renderPnlChart(data);
+  renderPnlTable(data);
+}
+
+function renderPnlStats(data) {
+  const wrap = document.getElementById('pnl-stats');
+  if (!data.length) {
+    wrap.innerHTML = '<div class="empty-msg" style="padding:0">No exits recorded yet.</div>';
+    return;
+  }
+  const pcts = data.map(d => d.pnl_pct * 100);
+  const wins = pcts.filter(p => p > 0).length;
+  const winRate = (wins / pcts.length * 100).toFixed(0);
+  const avg = (pcts.reduce((a,b) => a+b, 0) / pcts.length).toFixed(1);
+  const best = Math.max(...pcts).toFixed(1);
+  const worst = Math.min(...pcts).toFixed(1);
+  const total = data.length;
+
+  const statCard = (label, value, cls) =>
+    `<div class="stat-card"><div class="stat-label">${label}</div><div class="stat-value ${cls}">${value}</div></div>`;
+
+  wrap.innerHTML = [
+    statCard('Total Exits', total, 'neu'),
+    statCard('Win Rate', winRate + '%', parseFloat(winRate) >= 50 ? 'pos' : 'neg'),
+    statCard('Avg P&L', (avg >= 0 ? '+' : '') + avg + '%', parseFloat(avg) >= 0 ? 'pos' : 'neg'),
+    statCard('Best', '+' + best + '%', 'pos'),
+    statCard('Worst', worst + '%', 'neg'),
+  ].join('');
+}
+
+function renderPnlChart(data) {
+  const wrap = document.getElementById('pnl-chart-wrap');
+  if (!data.length) { wrap.innerHTML = ''; return; }
+
+  const items = data.slice(-60); // last 60 exits
+  const pcts = items.map(d => d.pnl_pct * 100);
+  const absMax = Math.max(Math.abs(Math.max(...pcts)), Math.abs(Math.min(...pcts)), 10);
+  const yMax = Math.ceil(absMax * 1.15);
+
+  const lpad=48, rpad=16, tpad=16, bpad=52;
+  const barW=18, barGap=6;
+  const W = lpad + items.length * (barW + barGap) + rpad;
+  const H = 200;
+  const chartH = H - tpad - bpad;
+  const zeroY = tpad + chartH * yMax / (yMax * 2);
+
+  const scaleY = v => tpad + chartH * (yMax - v) / (yMax * 2);
+
+  let s = `<div class="pnl-chart-title">P&L per exit (last ${items.length} trades)</div>`;
+  s += `<svg viewBox="0 0 ${W} ${H}" width="${Math.max(W, 400)}" height="${H}" style="display:block">`;
+
+  // Y axis gridlines and labels
+  const yTicks = [];
+  const step = yMax <= 20 ? 5 : yMax <= 50 ? 10 : yMax <= 100 ? 25 : 50;
+  for (let v = -yMax; v <= yMax; v += step) yTicks.push(v);
+  for (const v of yTicks) {
+    const y = scaleY(v);
+    const isZero = v === 0;
+    s += `<line x1="${lpad}" y1="${y}" x2="${W-rpad}" y2="${y}"
+               stroke="${isZero ? 'var(--muted)' : 'var(--border)'}"
+               stroke-width="${isZero ? 1.5 : 1}" stroke-dasharray="${isZero ? '' : '3,4'}"/>`;
+    s += `<text x="${lpad-6}" y="${y+4}" text-anchor="end" font-size="9"
+               fill="${isZero ? 'var(--text)' : 'var(--muted)'}">${v > 0 ? '+' : ''}${v}%</text>`;
+  }
+
+  // Bars
+  items.forEach((d, i) => {
+    const pct = d.pnl_pct * 100;
+    const x = lpad + i * (barW + barGap);
+    const barH = Math.max(2, Math.abs(scaleY(pct) - zeroY));
+    const y = pct >= 0 ? scaleY(pct) : zeroY;
+    const color = pct >= 0 ? 'var(--green)' : 'var(--red)';
+    const reason = (d.reason || '').replace('_', ' ').replace(/\b\w/g, c => c.toUpperCase());
+    const ts = d.timestamp ? new Date(d.timestamp).toLocaleDateString() : '';
+    s += `<rect x="${x}" y="${y}" width="${barW}" height="${barH}" fill="${color}" rx="2" opacity=".85">
+            <title>${d.ticker} · ${(pct >= 0 ? '+' : '') + pct.toFixed(1)}% · ${reason} · ${ts}</title>
+          </rect>`;
+    // X label: ticker, rotated
+    const labelX = x + barW / 2;
+    const labelY = H - bpad + 10;
+    s += `<text x="${labelX}" y="${labelY}" text-anchor="end" font-size="9" fill="var(--muted)"
+               transform="rotate(-45,${labelX},${labelY})">${d.ticker}</text>`;
+  });
+
+  s += `</svg>`;
+  wrap.innerHTML = s;
+}
+
+function renderPnlTable(data) {
+  const wrap = document.getElementById('pnl-table-wrap');
+  if (!data.length) { wrap.innerHTML = ''; return; }
+  const reasonLabel = r => (r||'').replace(/_/g,' ').replace(/\b\w/g,c=>c.toUpperCase());
+  wrap.innerHTML = `<table>
+    <thead><tr><th>Time</th><th>Ticker</th><th>P&L %</th><th>Exit Reason</th></tr></thead>
+    <tbody>
+    ${[...data].reverse().map(d => {
+      const pct = (d.pnl_pct * 100);
+      const cls = pct >= 0 ? 'result-ok' : 'result-err';
+      const sign = pct >= 0 ? '+' : '';
+      const ts = d.timestamp ? new Date(d.timestamp).toLocaleString() : '—';
+      return `<tr>
+        <td style="color:var(--muted);font-size:11px">${ts}</td>
+        <td><b>${d.ticker}</b></td>
+        <td class="${cls}"><b>${sign}${pct.toFixed(1)}%</b></td>
+        <td style="color:var(--muted);font-size:11px">${reasonLabel(d.reason)}</td>
+      </tr>`;
+    }).join('')}
+    </tbody></table>`;
+}
+
 // ── Glossary ──────────────────────────────────────────────────────────
 function initGlossary() {
   const btn   = document.getElementById('glossary-btn');
@@ -659,6 +788,7 @@ function refreshAll() {
   if (activeTab === 'decisions')  loadDecisions();
   if (activeTab === 'proposals')  loadProposals();
   if (activeTab === 'log')        loadLog();
+  if (activeTab === 'pnl')        loadPnl();
 }
 
 // ── Boot ──────────────────────────────────────────────────────────────
@@ -709,6 +839,7 @@ _DASHBOARD_HTML = f"""<!DOCTYPE html>
   <button data-tab="decisions">Decisions</button>
   <button data-tab="proposals">Proposals</button>
   <button data-tab="log">Log</button>
+  <button data-tab="pnl">P&amp;L</button>
 </nav>
 
 <div id="tab-market" class="tab-pane active">
@@ -725,6 +856,12 @@ _DASHBOARD_HTML = f"""<!DOCTYPE html>
 
 <div id="tab-log" class="tab-pane">
   <div class="log-wrap" id="log-wrap"><div class="empty-msg">Loading…</div></div>
+</div>
+
+<div id="tab-pnl" class="tab-pane">
+  <div id="pnl-stats" class="pnl-stats-row"><div class="empty-msg" style="padding:0">Loading…</div></div>
+  <div id="pnl-chart-wrap" class="pnl-chart-outer" style="margin-top:4px"></div>
+  <div id="pnl-table-wrap" class="pnl-table-wrap"></div>
 </div>
 
 <!-- Detail drawer -->

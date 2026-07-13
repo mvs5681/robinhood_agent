@@ -36,6 +36,7 @@ from .telemetry_reader import TelemetryReader
 if TYPE_CHECKING:
     from trader.executor.executor import Executor
     from .cache import GEXCache
+    from .position_store import PositionStore
 
 logger = logging.getLogger(__name__)
 
@@ -905,6 +906,7 @@ def create_app(
     telemetry_reader: TelemetryReader | None = None,
     cache: GEXCache | None = None,
     dashboard_token: str = "",
+    position_store: PositionStore | None = None,
 ) -> web.Application:
     reader = telemetry_reader or TelemetryReader()
 
@@ -952,7 +954,9 @@ def create_app(
             return _json_response({"error": "proposal not found or already decided"}, status=404)
         t0 = _time.monotonic()
         try:
-            result = await executor.execute(proposal.candidate)
+            # execute_approved: the human already approved via the dashboard —
+            # must not route through the LangGraph interrupt in execute()
+            result = await executor.execute_approved(proposal.candidate)
             ms = round((_time.monotonic() - t0) * 1000, 1)
             if tel:
                 c = proposal.candidate
@@ -961,15 +965,22 @@ def create_app(
                     ticker=c.ticker,
                     mode="rh_approval",
                     action="buy",
-                    quantity=1,
+                    quantity=result.request.quantity,
                     limit_price=float(sc.mid) if sc else None,
                     placed=result.placed,
                     order_id=result.order_id,
-                    account_number=None,
+                    account_number=executor.account_number or None,
                     rejection_reason=result.rejection_reason,
                     review_summary=result.review_summary,
                     duration_ms=ms,
                 )
+            if result.placed and position_store is not None:
+                from .position_store import make_position
+                pos = make_position(proposal.candidate, result, result.request.quantity)
+                if pos:
+                    await position_store.add(pos)
+                    logger.info("Position tracked %s position_id=%s",
+                                proposal.candidate.ticker, pos.position_id)
             await proposal_store.mark_executed(pid, result)
             return _json_response({"status": "executed", "placed": result.placed, "order_id": result.order_id})
         except Exception as exc:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from typing import Callable
 
 from trader.scoring.schemas import CandidateSignal
 
@@ -29,10 +30,14 @@ class RiskEngine:
         params: RiskParams | None = None,
         portfolio: PortfolioState | None = None,
         sector_map: dict[str, str] | None = None,
+        open_positions_fn: Callable[[], int] | None = None,
     ) -> None:
         self.params = params or RiskParams()
         self._sector_map: dict[str, str] = sector_map or {}
         self._kill_switch_active = False
+        # Live position count source (e.g. PositionStore.count). Preferred over
+        # the internal record_fill counter, which never decrements on exits.
+        self._open_positions_fn = open_positions_fn
 
         p = portfolio or PortfolioState()
         self._open_positions: int = p.open_positions
@@ -56,7 +61,11 @@ class RiskEngine:
 
         reasons: list[str] = []
 
-        if self._open_positions >= self.params.max_concurrent_positions:
+        open_positions = (
+            self._open_positions_fn() if self._open_positions_fn is not None
+            else self._open_positions
+        )
+        if open_positions >= self.params.max_concurrent_positions:
             reasons.append(
                 f"max_concurrent_positions ({self.params.max_concurrent_positions}) reached"
             )

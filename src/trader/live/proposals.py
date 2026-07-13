@@ -117,10 +117,26 @@ class ProposalStore:
     """
 
     TTL_SECONDS = 1800  # 30 minutes
+    RETENTION_SECONDS = 3600  # decided/expired proposals dropped after 1 h
 
     def __init__(self) -> None:
         self._proposals: dict[str, Proposal] = {}
         self._lock = asyncio.Lock()
+
+    def _prune(self) -> None:
+        """Drop decided/expired proposals past retention. Caller must hold the lock.
+
+        Decision history lives in telemetry — this store only needs entries
+        that can still be acted on or re-displayed shortly after deciding.
+        """
+        now = datetime.now(timezone.utc)
+        stale = [
+            pid for pid, p in self._proposals.items()
+            if p.status != "pending"
+            and (now - (p.decided_at or p.created_at)).total_seconds() > self.RETENTION_SECONDS
+        ]
+        for pid in stale:
+            del self._proposals[pid]
 
     async def add(self, candidate: CandidateSignal, run_id: str | None = None) -> Proposal:
         proposal = Proposal(
@@ -130,6 +146,7 @@ class ProposalStore:
             run_id=run_id,
         )
         async with self._lock:
+            self._prune()
             self._proposals[proposal.proposal_id] = proposal
         return proposal
 
@@ -140,6 +157,7 @@ class ProposalStore:
     async def list_pending(self) -> list[Proposal]:
         now = datetime.now(timezone.utc)
         async with self._lock:
+            self._prune()
             out = []
             for p in self._proposals.values():
                 if p.status == "pending":
@@ -151,20 +169,30 @@ class ProposalStore:
             return out
 
     async def approve(self, proposal_id: str) -> Proposal | None:
+        """Transition pending → approved. Returns None unless this call made the
+        transition (unknown id, already decided, or past TTL), so callers can't
+        double-execute on a repeated approval."""
         async with self._lock:
             p = self._proposals.get(proposal_id)
-            if p and p.status == "pending":
-                p.status = "approved"
-                p.decided_at = datetime.now(timezone.utc)
+            if p is None or p.status != "pending":
+                return None
+            age = (datetime.now(timezone.utc) - p.created_at).total_seconds()
+            if age > self.TTL_SECONDS:
+                p.status = "expired"
+                return None
+            p.status = "approved"
+            p.decided_at = datetime.now(timezone.utc)
             return p
 
     async def reject(self, proposal_id: str, note: str = "") -> Proposal | None:
+        """Transition pending → rejected. Returns None unless this call made the transition."""
         async with self._lock:
             p = self._proposals.get(proposal_id)
-            if p and p.status == "pending":
-                p.status = "rejected"
-                p.decided_at = datetime.now(timezone.utc)
-                p.rejection_note = note
+            if p is None or p.status != "pending":
+                return None
+            p.status = "rejected"
+            p.decided_at = datetime.now(timezone.utc)
+            p.rejection_note = note
             return p
 
     async def mark_executed(self, proposal_id: str, result: OrderResult) -> None:

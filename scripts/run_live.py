@@ -49,6 +49,7 @@ from trader.live.scanner import GEXScanner
 from trader.live.telemetry_reader import TelemetryReader
 from trader.live.watcher import FlowWatcher
 from trader.rh.mcp_config import load_rh_tools, refresh_rh_token
+from trader.risk.engine import RiskEngine
 from trader.telemetry.logger import TelemetryLogger
 from trader.uw.mcp_config import load_uw_tools
 
@@ -174,6 +175,8 @@ async def main() -> None:
     cache = GEXCache()
     proposal_store = ProposalStore()
     position_store = PositionStore()
+    # Position cap reads live from PositionStore so exits free up slots
+    risk_engine = RiskEngine(open_positions_fn=lambda: position_store.count)
 
     max_trade_spend_raw = os.environ.get("MAX_TRADE_SPEND", "")
     max_trade_spend = Decimal(max_trade_spend_raw) if max_trade_spend_raw else None
@@ -212,6 +215,7 @@ async def main() -> None:
         tel=tel,
         notifier=notifier,
         position_store=position_store,
+        risk_engine=risk_engine,
     )
 
     exit_loop = ExitLoop(
@@ -222,6 +226,7 @@ async def main() -> None:
         monitor=ExitMonitor(stop_loss_pct=stop_loss_pct, dte_floor=dte_floor),
         tel=tel,
         notifier=notifier,
+        risk_engine=risk_engine,
     )
 
     dashboard_token = os.environ.get("DASHBOARD_TOKEN", "")
@@ -234,6 +239,7 @@ async def main() -> None:
         telemetry_reader=tel_reader,
         cache=cache,
         dashboard_token=dashboard_token,
+        position_store=position_store,
     )
     runner = web.AppRunner(app)
     await runner.setup()

@@ -85,9 +85,13 @@ def _to_position(item: dict) -> Position | None:
         if quantity <= 0:
             return None
 
-        # average_price is cost basis per share (multiply by 100 for one contract)
+        # RH average_price is per-contract (premium × 100) — convert to the
+        # per-share premium that ExitMonitor compares against option mids
         avg_price_raw = item.get("average_price") or item.get("average_buy_price") or "0"
-        entry_premium = Decimal(str(avg_price_raw))
+        entry_premium = Decimal(str(avg_price_raw)) / 100
+        if entry_premium <= 0:
+            logger.warning("Reconcile: skipping %s — no usable average_price", ticker)
+            return None
 
         created_raw = item.get("created_at") or item.get("opened_at")
         try:
@@ -164,9 +168,8 @@ async def reconcile_positions(
         logger.warning(
             "Reconciled %d open position(s) from Robinhood. "
             "Profit targets are disabled for reconciled positions — "
-            "stop-loss (%.0f%%) and DTE floor are active.",
+            "stop-loss and DTE floor are active.",
             recovered,
-            float(pos.entry_premium),  # last pos logged above
         )
     else:
         logger.info("Reconciliation complete — no open positions found in Robinhood")

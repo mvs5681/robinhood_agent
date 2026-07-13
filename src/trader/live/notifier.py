@@ -135,9 +135,13 @@ class TelegramNotifier:
         except Exception as exc:
             logger.warning("Failed to send Telegram notification: %s", exc)
 
-    async def _edit_message(self, proposal_id: str, text: str) -> None:
-        """Edit the original notification message in-place."""
-        msg_id = self._msg_ids.get(proposal_id)
+    async def _edit_message(self, proposal_id: str, text: str, *, final: bool = False) -> None:
+        """Edit the original notification message in-place.
+
+        final=True forgets the message id afterwards — no further edits are
+        possible, and the map would otherwise grow for the process lifetime.
+        """
+        msg_id = self._msg_ids.pop(proposal_id, None) if final else self._msg_ids.get(proposal_id)
         if not msg_id:
             return
         payload = {
@@ -280,7 +284,7 @@ class TelegramNotifier:
                 + ("✓ Telegram confirmed. Agent is live and ready to trade." if confirmed
                    else "Dismissed.")
             )
-            await self._edit_message(_STARTUP_KEY, body_text)
+            await self._edit_message(_STARTUP_KEY, body_text, final=True)
             logger.info("Telegram startup check %s", "confirmed" if confirmed else "dismissed")
             return
 
@@ -295,6 +299,7 @@ class TelegramNotifier:
             await self._edit_message(
                 proposal_id,
                 self._proposal_text(proposal, status="rejected"),
+                final=True,
             )
             logger.info("Proposal %s rejected via Telegram", proposal_id)
 
@@ -323,7 +328,7 @@ class TelegramNotifier:
                         ticker=c.ticker,
                         mode="rh_approval",
                         action="buy",
-                        quantity=executor.quantity,
+                        quantity=result.request.quantity,
                         limit_price=float(lp) if lp is not None else None,
                         placed=result.placed,
                         order_id=result.order_id,
@@ -334,7 +339,7 @@ class TelegramNotifier:
                     )
                 if result.placed and position_store is not None:
                     from .position_store import make_position
-                    pos = make_position(proposal.candidate, result, executor.quantity)
+                    pos = make_position(proposal.candidate, result, result.request.quantity)
                     if pos:
                         await position_store.add(pos)
                         logger.info("Position tracked %s position_id=%s", proposal.candidate.ticker, pos.position_id)
@@ -343,6 +348,7 @@ class TelegramNotifier:
                 await self._edit_message(
                     proposal_id,
                     self._proposal_text(proposal, status=status_text),
+                    final=True,
                 )
                 logger.info("Proposal %s executed placed=%s order_id=%s",
                             proposal_id, result.placed, result.order_id)
@@ -351,6 +357,7 @@ class TelegramNotifier:
                 await self._edit_message(
                     proposal_id,
                     self._proposal_text(proposal, status=f"error — {exc}"),
+                    final=True,
                 )
 
     # ------------------------------------------------------------------

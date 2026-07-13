@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from langchain_core.tools import BaseTool
     from trader.live.notifier import TelegramNotifier
     from trader.live.position_store import PositionStore
+    from trader.risk.engine import RiskEngine
     from trader.telemetry.logger import TelemetryLogger
 
 logger = logging.getLogger(__name__)
@@ -59,6 +60,7 @@ class ExitLoop:
         tel: "TelemetryLogger | None" = None,
         notifier: "TelegramNotifier | None" = None,
         poll_interval: int = _POLL_INTERVAL,
+        risk_engine: "RiskEngine | None" = None,
     ) -> None:
         self._rh_tools = rh_tools
         self._store = position_store
@@ -68,6 +70,7 @@ class ExitLoop:
         self._tel = tel
         self._notifier = notifier
         self._poll_interval = poll_interval
+        self._risk_engine = risk_engine
 
     async def run(self) -> None:
         logger.info(
@@ -168,6 +171,12 @@ class ExitLoop:
                 return  # keep position in store — retry next tick
 
         await self._store.remove(pos.position_id)
+
+        if self._risk_engine is not None and not dry_run:
+            realized = (signal.current_premium - pos.entry_premium) * 100 * pos.quantity
+            self._risk_engine.record_pnl(realized)
+            if self._risk_engine.kill_switch_active:
+                logger.warning("Daily loss kill-switch tripped — new entries blocked")
 
         ms = round((_time.monotonic() - t0) * 1000, 1)
         if self._tel:

@@ -173,24 +173,28 @@ class TelemetryLogger:
         self._run_id: str | None = None
 
         self._file: TextIOWrapper | None = None
+        self._owns_file = False
         file_path = log_file or os.environ.get("TELEMETRY_LOG_FILE")
         if file_path:
             path = Path(file_path)
             path.parent.mkdir(parents=True, exist_ok=True)
             self._file = open(path, "a", encoding="utf-8")  # noqa: SIM115
+            self._owns_file = True
 
     def with_run_id(self, run_id: str) -> "TelemetryLogger":
         """Return a child logger that stamps run_id on every event.
 
         The child shares the same file handle and level — only run_id differs.
+        It does not own the file, so its garbage collection won't close it.
         """
         child = object.__new__(TelemetryLogger)
         child.__dict__.update(self.__dict__)
         child._run_id = run_id
+        child._owns_file = False
         return child
 
     def close(self) -> None:
-        if self._file:
+        if self._file and self._owns_file:
             self._file.close()
             self._file = None
 

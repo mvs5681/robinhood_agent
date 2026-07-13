@@ -75,6 +75,7 @@ class FlowWatcher:
         poll_interval: int = _POLL_INTERVAL,
         notifier: TelegramNotifier | None = None,
         position_store: PositionStore | None = None,
+        risk_engine: RiskEngine | None = None,
     ) -> None:
         self.uw_tools = uw_tools
         self.cache = cache
@@ -89,12 +90,14 @@ class FlowWatcher:
             min_premium=flow_min_premium, lookback_hours=flow_lookback_hours
         )
         self._selector = ContractSelector(selector_params)
-        self._engine = RiskEngine(
+        self._engine = risk_engine or RiskEngine(
             params=risk_params, portfolio=PortfolioState(), sector_map=sector_map
         )
         self._notifier = notifier
         self._position_store = position_store
-        self._seen: set[str] = set()   # dedup by (ticker, expiry, strike, type, created_at)
+        # dedup by (ticker, expiry, strike, type, created_at) — dict preserves
+        # insertion order so trimming drops the oldest keys, not arbitrary ones
+        self._seen: dict[str, None] = {}
 
     async def run(self) -> None:
         logger.info("FlowWatcher started — mode=%s (tracks GEXScanner cache dynamically)", self.mode.value)
@@ -143,8 +146,12 @@ class FlowWatcher:
             logger.debug("FlowWatcher: new alerts for %s but none in GEX cache yet",
                          {a.ticker for a in new_alerts})
             return
-        tasks = [self._run_pipeline(ticker, alerts) for ticker in affected]
-        await asyncio.gather(*tasks, return_exceptions=True)
+        affected_ordered = sorted(affected)
+        tasks = [self._run_pipeline(ticker, alerts) for ticker in affected_ordered]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for ticker, result in zip(affected_ordered, results):
+            if isinstance(result, Exception):
+                logger.error("%s pipeline failed: %s", ticker, result)
 
     def _alert_key(self, alert: FlowAlert) -> str:
         return f"{alert.ticker}:{alert.expiry}:{alert.strike}:{alert.type}:{alert.created_at}"
@@ -157,11 +164,11 @@ class FlowWatcher:
                 continue
             key = self._alert_key(a)
             if key not in self._seen:
-                self._seen.add(key)
+                self._seen[key] = None
                 new.append(a)
-        # Prevent unbounded growth
+        # Prevent unbounded growth — keep the most recent half
         if len(self._seen) > 10_000:
-            self._seen = set(list(self._seen)[-5_000:])
+            self._seen = dict(list(self._seen.items())[-5_000:])
         return new
 
     async def _run_pipeline(self, ticker: str, all_alerts: list[FlowAlert]) -> None:
@@ -248,7 +255,7 @@ class FlowWatcher:
                             duration_ms=ms,
                         )
                     if result.placed and self._position_store is not None:
-                        pos = make_position(candidate, result, self.executor.quantity)
+                        pos = make_position(candidate, result, result.request.quantity)
                         if pos:
                             await self._position_store.add(pos)
                             logger.info("Position tracked %s position_id=%s", ticker, pos.position_id)

@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 
 from langchain_core.tools import BaseTool
 
+from trader.contracts.selector import SelectorParams
 from trader.gex.detector import GEXDetector
 from trader.gex.schemas import GEXDetectorParams
 from trader.telemetry.logger import TelemetryLogger
@@ -67,6 +68,7 @@ class GEXScanner:
         tel: TelemetryLogger | None = None,
         scan_interval: int = _SCAN_INTERVAL,
         config: "LiveConfig | None" = None,
+        selector_params: SelectorParams | None = None,
     ) -> None:
         self._seed_tickers = list(seed_tickers or [])
         self.uw_tools = uw_tools
@@ -77,6 +79,9 @@ class GEXScanner:
         self.tel = tel
         self.scan_interval = scan_interval
         self._config = config
+        # Must match the ContractSelector's window so the fetched contracts
+        # are the ones the selector will actually consider
+        self._selector_params = selector_params or SelectorParams()
         self._sem: asyncio.Semaphore | None = None  # created lazily inside event loop
 
     # Live-tunable settings — read from LiveConfig each cycle when provided,
@@ -253,8 +258,34 @@ class GEXScanner:
                                      {"ticker_symbol": ticker, "limit": 100}, parse_darkpool_prints)
         snap.net_prem_ticks = await _fetch("get_flow_per_strike",
                                            {"ticker": ticker}, parse_net_prem_ticks)
-        snap.option_contracts = await _fetch("get_options_chain",
-                                             {"ticker": ticker, "limit": 50}, parse_option_contracts)
+
+        # Contracts via the options screener, filtered server-side to the
+        # selector's DTE/delta window — the unfiltered chain endpoint returns
+        # an arbitrary 50 contracts (usually 0-18 DTE) that the selector then
+        # rejects wholesale. Screener delta filters are signed, so puts need
+        # a mirrored range. Falls back to the raw chain if the screener is
+        # unavailable (e.g. mock tools) or returns nothing.
+        sp = self._selector_params
+        contracts = []
+        if "get_options_screener" in self.uw_tools:
+            base = {
+                "ticker_symbol": ticker,
+                "min_dte": str(sp.dte_min), "max_dte": str(sp.dte_max),
+                "limit": 50,
+            }
+            calls = await _fetch("get_options_screener",
+                                 {**base, "type": "Calls",
+                                  "min_delta": str(sp.delta_min), "max_delta": str(sp.delta_max)},
+                                 parse_option_contracts)
+            puts = await _fetch("get_options_screener",
+                                {**base, "type": "Puts",
+                                 "min_delta": str(-sp.delta_max), "max_delta": str(-sp.delta_min)},
+                                parse_option_contracts)
+            contracts = calls + puts
+        if not contracts:
+            contracts = await _fetch("get_options_chain",
+                                     {"ticker": ticker, "limit": 50}, parse_option_contracts)
+        snap.option_contracts = contracts
 
         technicals: dict = {}
         for fn in ("RSI", "MACD"):

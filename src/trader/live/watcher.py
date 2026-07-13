@@ -123,7 +123,12 @@ class FlowWatcher:
             self._trigger.min_premium = self._config.flow_min_premium
         t0 = _time.monotonic()
         try:
-            raw = await self.uw_tools["get_flow_alerts"].ainvoke({"limit": 100})
+            # Server-side premium filter: only prints that could actually
+            # confirm a trade trigger a pipeline run, instead of every small
+            # alert producing a guaranteed "no matching whale print" skip.
+            raw = await self.uw_tools["get_flow_alerts"].ainvoke(
+                {"limit": 100, "min_premium": str(self._trigger.min_premium)}
+            )
             alerts: list[FlowAlert] = parse_flow_alerts(raw)
         except Exception as exc:
             logger.error("get_flow_alerts failed: %s", exc)

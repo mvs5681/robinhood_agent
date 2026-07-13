@@ -161,7 +161,7 @@ def parse_option_contracts(raw: Any) -> list[OptionContract]:
                 "ask":                item.get("ask") or item.get("nbbo_ask") or 0,
                 "open_interest":      item.get("open_interest") or 0,
                 "volume":             item.get("volume") or 0,
-                "implied_volatility": item.get("implied_volatility"),
+                "implied_volatility": item.get("implied_volatility") or item.get("iv"),
                 "delta":              item.get("delta"),
                 "gamma":              item.get("gamma"),
                 "theta":              item.get("theta"),

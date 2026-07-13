@@ -275,17 +275,56 @@ function initTabs() {
 // ── Drawer ────────────────────────────────────────────────────────────
 const drawer = document.getElementById('drawer');
 function openDrawer(runId) {
+  drawer.classList.add('open');
+  if (runId.startsWith('market:')) { openMarketDrawer(runId.slice(7)); return; }
   fetch('/api/decisions/' + encodeURIComponent(runId))
     .then(r => r.json())
-    .then(d => renderDrawer(d));
-  drawer.classList.add('open');
+    .then(d => renderDrawer(d))
+    .catch(() => renderDrawerError('Failed to load decision detail'));
 }
 function closeDrawer() { drawer.classList.remove('open'); }
 document.getElementById('drawer-close').addEventListener('click', closeDrawer);
 
+function renderDrawerError(msg) {
+  document.getElementById('drawer-title').textContent = 'Detail';
+  document.getElementById('drawer-body').innerHTML = `<div class="empty-msg">${msg}</div>`;
+}
+
+async function openMarketDrawer(ticker) {
+  let t = null;
+  try {
+    const data = await fetch('/api/market').then(r => r.json());
+    t = data.find(x => x.ticker === ticker);
+  } catch (e) { /* fall through to error message */ }
+  if (!t) { renderDrawerError(ticker + ' not found in GEX cache'); return; }
+
+  document.getElementById('drawer-title').textContent = ticker + ' — GEX Snapshot';
+  const html = [];
+  html.push(sectionHeader('GEX Setup', {result: 'ok'}));
+  html.push(gexRuler(t));
+  html.push('<div class="d-grid">');
+  html.push(kv('Regime', tip(capitalize(t.regime), 'Regime')));
+  html.push(kv('Setup Type', capitalize(t.setup_type || '')));
+  html.push(kv('Direction', capitalize(t.direction || '')));
+  html.push(kv('Confidence', tip(fmtPct(t.confidence), 'Structure Confidence')));
+  html.push(kv('Spot', fmtPrice(t.spot_price)));
+  html.push(kv('Flip Point', tip(fmtPrice(t.flip_point), 'Flip Point')));
+  html.push(kv('Target', tip(fmtPrice(t.target_level), 'Target Level')));
+  html.push(kv('Call Wall', tip(fmtPrice(t.call_wall), 'Call Wall')));
+  html.push(kv('Put Wall', tip(fmtPrice(t.put_wall), 'Put Wall')));
+  html.push(kv('Last Scan', t.last_scan ? new Date(t.last_scan).toLocaleTimeString() : '—'));
+  html.push(kv('Freshness', t.stale
+    ? '<span style="color:var(--red)">● Stale</span>'
+    : '<span style="color:var(--green)">● Live</span>'));
+  html.push('</div>');
+  document.getElementById('drawer-body').innerHTML = html.join('');
+}
+
 function renderDrawer(d) {
+  if (!d || d.error || !d.stages) { renderDrawerError((d && d.error) || 'Decision not found'); return; }
+  const outcomeText = (d.outcome || 'unknown').replace('skipped_', 'skipped: ').replace('error_', 'error: ');
   document.getElementById('drawer-title').textContent =
-    d.ticker + ' — ' + (d.stages.gex_setup?.direction || '') + ' — ' + formatOutcome(d.outcome);
+    d.ticker + ' — ' + (d.stages.gex_setup?.direction || '') + ' — ' + outcomeText;
 
   const html = [];
   const gs = d.stages.gex_setup;

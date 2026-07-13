@@ -82,12 +82,12 @@ class TestDataStore:
         required = {
             "get_market_tide",
             "get_flow_alerts",
-            "get_spot_exposures_by_strike",
-            "get_darkpool_ticker",
-            "get_net_prem_ticks",
-            "get_option_contracts",
+            "get_greek_exposure_by_strike",
+            "get_dark_pool_trades",
+            "get_flow_per_strike",
+            "get_options_chain",
             "get_interpolated_iv",
-            "get_technical_indicator",
+            "get_extended_technical_indicator",
         }
         assert required.issubset(names)
 
@@ -101,14 +101,14 @@ class TestDataStore:
     async def test_ticker_tool_dispatches_on_ticker_kwarg(self, store: DataStore):
         s = store.load(date(2026, 1, 2))
         tool_map = {t.name: t for t in s.as_tools()}
-        result = await tool_map["get_spot_exposures_by_strike"].ainvoke({"ticker": "AAPL"})
+        result = await tool_map["get_greek_exposure_by_strike"].ainvoke({"ticker": "AAPL"})
         assert "data" in result
         assert len(result["data"]) == 7
 
     async def test_technical_tool_dispatches_on_function_kwarg(self, store: DataStore):
         s = store.load(date(2026, 1, 2))
         tool_map = {t.name: t for t in s.as_tools()}
-        result = await tool_map["get_technical_indicator"].ainvoke(
+        result = await tool_map["get_extended_technical_indicator"].ainvoke(
             {"ticker": "AAPL", "function": "RSI", "interval": "daily"}
         )
         assert "data" in result

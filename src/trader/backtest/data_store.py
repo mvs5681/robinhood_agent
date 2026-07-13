@@ -80,7 +80,9 @@ class BacktestDataSlice:
 
         def _by_ticker(store: dict[str, Any]) -> Any:
             def _fn(kwargs: dict) -> Any:
-                return store.get(kwargs.get("ticker", ""), {"data": []})
+                # get_dark_pool_trades passes ticker_symbol; the rest pass ticker
+                ticker = kwargs.get("ticker") or kwargs.get("ticker_symbol", "")
+                return store.get(ticker, {"data": []})
             return _fn
 
         def _technicals(kwargs: dict) -> Any:
@@ -91,12 +93,12 @@ class BacktestDataSlice:
         return [
             _SliceTool("get_market_tide", _market_tide),
             _SliceTool("get_flow_alerts", _flow_alerts),
-            _SliceTool("get_spot_exposures_by_strike", _by_ticker(self.spot_gex_raw)),
-            _SliceTool("get_darkpool_ticker", _by_ticker(self.darkpool_raw)),
-            _SliceTool("get_net_prem_ticks", _by_ticker(self.net_prem_ticks_raw)),
-            _SliceTool("get_option_contracts", _by_ticker(self.option_contracts_raw)),
+            _SliceTool("get_greek_exposure_by_strike", _by_ticker(self.spot_gex_raw)),
+            _SliceTool("get_dark_pool_trades", _by_ticker(self.darkpool_raw)),
+            _SliceTool("get_flow_per_strike", _by_ticker(self.net_prem_ticks_raw)),
+            _SliceTool("get_options_chain", _by_ticker(self.option_contracts_raw)),
             _SliceTool("get_interpolated_iv", _by_ticker(self.interpolated_iv_raw)),
-            _SliceTool("get_technical_indicator", _technicals),
+            _SliceTool("get_extended_technical_indicator", _technicals),
         ]
 
     # ------------------------------------------------------------------

@@ -28,11 +28,11 @@ def mock_tool_list(flow_alerts_raw, market_tide_raw, darkpool_raw, gex_positive_
     return [
         _make_mock_tool("get_flow_alerts", flow_alerts_raw),
         _make_mock_tool("get_market_tide", market_tide_raw),
-        _make_mock_tool("get_darkpool_ticker", darkpool_raw),
-        _make_mock_tool("get_spot_exposures_by_strike", gex_positive_raw),
-        _make_mock_tool("get_net_prem_ticks", {"data": []}),
-        _make_mock_tool("get_option_contracts", {"data": []}),
-        _make_mock_tool("get_greeks", {"data": []}),
+        _make_mock_tool("get_dark_pool_trades", darkpool_raw),
+        _make_mock_tool("get_greek_exposure_by_strike", gex_positive_raw),
+        _make_mock_tool("get_flow_per_strike", {"data": []}),
+        _make_mock_tool("get_options_chain", {"data": []}),
+        _make_mock_tool("get_extended_technical_indicator", {"data": []}),
     ]
 
 

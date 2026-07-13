@@ -210,6 +210,13 @@ def detect_gex(
     gex_setups: dict[str, GEXSetup] = {}
     errors: list[str] = list(state.errors)
 
+    # Anchor GEXSetup.as_of to pipeline_date in backtest replay — the contract
+    # selector derives DTE from it, so wall-clock now() would make historical
+    # contracts look expired
+    detect_as_of: datetime | None = None
+    if state.pipeline_date is not None:
+        detect_as_of = datetime.combine(state.pipeline_date, dtime(16, 0), tzinfo=timezone.utc)
+
     for ticker in state.tickers:
         t0 = time.monotonic()
         gex_data = state.spot_gex.get(ticker, [])
@@ -236,7 +243,7 @@ def detect_gex(
             continue
 
         try:
-            setup = detector.detect(ticker, gex_data, spot)
+            setup = detector.detect(ticker, gex_data, spot, as_of=detect_as_of)
             gex_setups[ticker] = setup
             logger.info(
                 "%s: regime=%s confidence=%.2f direction=%s",

@@ -40,6 +40,7 @@ from trader.executor.schemas import ExecutionMode
 from trader.exits.monitor import ExitMonitor
 from trader.live.approval_server import create_app
 from trader.live.cache import GEXCache
+from trader.live.config import LiveConfig
 from trader.live.exit_loop import ExitLoop
 from trader.live.notifier import TelegramNotifier
 from trader.live.position_store import PositionStore
@@ -121,14 +122,16 @@ async def _validate_account(rh_tools: dict, account_number: str) -> None:
 
 
 async def main() -> None:
-    seed_tickers = [t.strip().upper() for t in os.environ.get("TICKERS", "").split(",") if t.strip()]
     mode_str = os.environ.get("EXECUTION_MODE", "rh_approval").lower()
     mode = ExecutionMode(mode_str)
     account_number = os.environ.get("RH_ACCOUNT_NUMBER", "")
     port = int(os.environ.get("HTTP_PORT", "8080"))
-    flow_min_premium = Decimal(os.environ.get("FLOW_MIN_PREMIUM", "100000"))
 
-    logger.info("Starting live agent: seed_tickers=%s mode=%s port=%d", seed_tickers, mode.value, port)
+    # Runtime-tunable settings: env defaults, overridden by dashboard edits
+    # persisted on the mounted volume (survive restarts)
+    config = LiveConfig.from_env(os.environ.get("LIVE_CONFIG_FILE", "logs/live_config.json"))
+
+    logger.info("Starting live agent: mode=%s port=%d config=%s", mode.value, port, config.to_dict())
 
     telemetry_log_file = os.environ.get("TELEMETRY_LOG_FILE")
     tel = TelemetryLogger(
@@ -190,20 +193,12 @@ async def main() -> None:
         max_contracts=int(os.environ.get("MAX_CONTRACTS", "20")),
     )
 
-    discovery_min_premium = Decimal(os.environ.get("DISCOVERY_MIN_PREMIUM", "250000"))
-    max_discovered_tickers = int(os.environ.get("MAX_DISCOVERED_TICKERS", "20"))
-
     scanner = GEXScanner(
         uw_tools=uw_tools,
         cache=cache,
-        seed_tickers=seed_tickers,
-        min_discovery_premium=discovery_min_premium,
-        max_discovered_tickers=max_discovered_tickers,
         tel=tel,
+        config=config,
     )
-
-    stop_loss_pct = float(os.environ.get("STOP_LOSS_PCT", "0.35"))
-    dte_floor = int(os.environ.get("DTE_FLOOR", "7"))
 
     watcher = FlowWatcher(
         uw_tools=uw_tools,
@@ -211,11 +206,12 @@ async def main() -> None:
         proposal_store=proposal_store,
         execution_mode=mode,
         executor=executor,
-        flow_min_premium=flow_min_premium,
+        flow_min_premium=config.flow_min_premium,
         tel=tel,
         notifier=notifier,
         position_store=position_store,
         risk_engine=risk_engine,
+        config=config,
     )
 
     exit_loop = ExitLoop(
@@ -223,10 +219,11 @@ async def main() -> None:
         position_store=position_store,
         account_number=account_number,
         execution_mode=mode,
-        monitor=ExitMonitor(stop_loss_pct=stop_loss_pct, dte_floor=dte_floor),
+        monitor=ExitMonitor(stop_loss_pct=config.stop_loss_pct, dte_floor=config.dte_floor),
         tel=tel,
         notifier=notifier,
         risk_engine=risk_engine,
+        config=config,
     )
 
     dashboard_token = os.environ.get("DASHBOARD_TOKEN", "")
@@ -240,6 +237,7 @@ async def main() -> None:
         cache=cache,
         dashboard_token=dashboard_token,
         position_store=position_store,
+        config=config,
     )
     runner = web.AppRunner(app)
     await runner.setup()

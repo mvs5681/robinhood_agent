@@ -27,6 +27,7 @@ from .market_hours import is_market_hours
 
 if TYPE_CHECKING:
     from langchain_core.tools import BaseTool
+    from trader.live.config import LiveConfig
     from trader.live.notifier import TelegramNotifier
     from trader.live.position_store import PositionStore
     from trader.risk.engine import RiskEngine
@@ -61,6 +62,7 @@ class ExitLoop:
         notifier: "TelegramNotifier | None" = None,
         poll_interval: int = _POLL_INTERVAL,
         risk_engine: "RiskEngine | None" = None,
+        config: "LiveConfig | None" = None,
     ) -> None:
         self._rh_tools = rh_tools
         self._store = position_store
@@ -71,6 +73,7 @@ class ExitLoop:
         self._notifier = notifier
         self._poll_interval = poll_interval
         self._risk_engine = risk_engine
+        self._config = config
 
     async def run(self) -> None:
         logger.info(
@@ -94,6 +97,9 @@ class ExitLoop:
     # ------------------------------------------------------------------
 
     async def _tick(self) -> None:
+        if self._config is not None:
+            self._monitor.stop_loss_pct = self._config.stop_loss_pct
+            self._monitor.dte_floor = self._config.dte_floor
         positions = await self._store.all()
         if not positions:
             return

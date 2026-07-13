@@ -36,7 +36,7 @@ from .cache import GEXCache, TickerSnapshot
 from .market_hours import is_market_hours, seconds_until_market_open
 
 if TYPE_CHECKING:
-    pass
+    from .config import LiveConfig
 
 logger = logging.getLogger(__name__)
 
@@ -66,16 +66,32 @@ class GEXScanner:
         detector_params: GEXDetectorParams | None = None,
         tel: TelemetryLogger | None = None,
         scan_interval: int = _SCAN_INTERVAL,
+        config: "LiveConfig | None" = None,
     ) -> None:
-        self.seed_tickers = list(seed_tickers or [])
+        self._seed_tickers = list(seed_tickers or [])
         self.uw_tools = uw_tools
         self.cache = cache
-        self.min_discovery_premium = min_discovery_premium
-        self.max_discovered_tickers = max_discovered_tickers
+        self._min_discovery_premium = min_discovery_premium
+        self._max_discovered_tickers = max_discovered_tickers
         self.detector = GEXDetector(detector_params)
         self.tel = tel
         self.scan_interval = scan_interval
+        self._config = config
         self._sem: asyncio.Semaphore | None = None  # created lazily inside event loop
+
+    # Live-tunable settings — read from LiveConfig each cycle when provided,
+    # so dashboard edits apply on the next scan without a restart.
+    @property
+    def seed_tickers(self) -> list[str]:
+        return self._config.seed_tickers if self._config else self._seed_tickers
+
+    @property
+    def min_discovery_premium(self) -> Decimal:
+        return self._config.discovery_min_premium if self._config else self._min_discovery_premium
+
+    @property
+    def max_discovered_tickers(self) -> int:
+        return self._config.max_discovered_tickers if self._config else self._max_discovered_tickers
 
     async def run(self) -> None:
         """Main loop — runs forever, sleeping between scans."""
@@ -102,13 +118,39 @@ class GEXScanner:
         Returns (tickers, spot_hints) where spot_hints maps ticker → latest
         underlying_price from flow alerts (used as spot fallback for index
         tickers that have no darkpool prints).
+
+        The UW MCP endpoint caps every response at 50 alerts and has no
+        pagination, so a single unfiltered call surfaces only a handful of
+        qualifying tickers. Instead we make one call per issue-type slice,
+        each pre-filtered server-side to min_premium, so each slice gets its
+        own 50-alert budget and indexes/ETFs aren't crowded out by stocks.
         """
         t0 = _time.monotonic()
-        try:
-            raw = await self.uw_tools["get_flow_alerts"].ainvoke({"limit": 200})
-            alerts = parse_flow_alerts(raw)
-        except Exception as exc:
-            logger.error("ticker discovery via get_flow_alerts failed: %s", exc)
+        slices = [
+            {"limit": 200, "min_premium": str(self.min_discovery_premium),
+             "issue_types": ["Index", "ETF"]},
+            {"limit": 200, "min_premium": str(self.min_discovery_premium),
+             "issue_types": ["Common Stock", "ADR"]},
+        ]
+        results = await asyncio.gather(
+            *[self.uw_tools["get_flow_alerts"].ainvoke(params) for params in slices],
+            return_exceptions=True,
+        )
+        alerts = []
+        seen_alerts: set[str] = set()
+        failures = 0
+        for params, result in zip(slices, results):
+            if isinstance(result, Exception):
+                failures += 1
+                logger.error("discovery slice %s failed: %s", params["issue_types"], result)
+                continue
+            for a in parse_flow_alerts(result):
+                key = f"{a.ticker}:{a.expiry}:{a.strike}:{a.type}:{a.created_at}"
+                if key not in seen_alerts:
+                    seen_alerts.add(key)
+                    alerts.append(a)
+        if failures == len(slices):
+            logger.error("ticker discovery via get_flow_alerts failed: all slices errored")
             return self.seed_tickers[:], {}
 
         premium_by_ticker: dict[str, Decimal] = defaultdict(Decimal)

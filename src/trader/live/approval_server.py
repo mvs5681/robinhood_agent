@@ -36,6 +36,7 @@ from .telemetry_reader import TelemetryReader
 if TYPE_CHECKING:
     from trader.executor.executor import Executor
     from .cache import GEXCache
+    from .config import LiveConfig
     from .position_store import PositionStore
 
 logger = logging.getLogger(__name__)
@@ -831,6 +832,80 @@ function refreshAll() {
   if (activeTab === 'pnl')        loadPnl();
 }
 
+// ── Settings tab ──────────────────────────────────────────────────────
+const SETTINGS_FIELDS = [
+  {key:'seed_tickers', label:'Seed Tickers', type:'text',
+   hint:'Comma-separated; always scanned every cycle, exempt from the premium threshold (e.g. SPY,QQQ,SPX)'},
+  {key:'discovery_min_premium', label:'Discovery Min Premium ($)', type:'number',
+   hint:'Minimum flow-alert premium for a ticker to enter the hourly scan'},
+  {key:'max_discovered_tickers', label:'Max Discovered Tickers', type:'number',
+   hint:'Cap on discovered tickers per scan cycle (1–100)'},
+  {key:'flow_min_premium', label:'Flow Min Premium ($)', type:'number',
+   hint:'Minimum whale-print premium to confirm a trade signal'},
+  {key:'stop_loss_pct', label:'Stop Loss (fraction)', type:'number', step:'0.01',
+   hint:'Close if option premium drops this fraction from entry (0.01–0.95, e.g. 0.35 = 35%)'},
+  {key:'dte_floor', label:'DTE Floor (days)', type:'number',
+   hint:'Close positions when days-to-expiry reaches this value (0–30)'},
+];
+
+async function loadSettings() {
+  const wrap = document.getElementById('settings-wrap');
+  let cfg;
+  try { cfg = await fetch('/api/config').then(r => r.json()); }
+  catch (e) { wrap.innerHTML = '<div class="empty-msg">Failed to load config.</div>'; return; }
+  if (cfg.error) { wrap.innerHTML = `<div class="empty-msg">${cfg.error}</div>`; return; }
+
+  wrap.innerHTML = `
+    <div style="max-width:560px">
+      <div style="font-size:12px;color:var(--muted);margin-bottom:14px">
+        Changes apply from the next scan / poll cycle — no restart needed. Saved to disk, so they survive restarts and override .env values.
+      </div>
+      ${SETTINGS_FIELDS.map(f => {
+        const val = f.key === 'seed_tickers' ? (cfg[f.key]||[]).join(',') : (cfg[f.key] ?? '');
+        return `<div style="margin-bottom:14px">
+          <label style="display:block;font-size:12px;font-weight:600;margin-bottom:3px">${f.label}</label>
+          <input id="set-${f.key}" type="${f.type}" ${f.step ? `step="${f.step}"` : ''} value="${val}"
+            style="width:100%;padding:7px 10px;background:var(--bg);color:var(--text);
+                   border:1px solid var(--border);border-radius:var(--radius);font-size:13px">
+          <div style="font-size:11px;color:var(--muted);margin-top:3px">${f.hint}</div>
+        </div>`;
+      }).join('')}
+      <button id="settings-save" style="padding:8px 20px;background:var(--blue);color:#fff;border:none;
+        border-radius:var(--radius);font-size:13px;font-weight:600;cursor:pointer">Save</button>
+      <span id="settings-status" style="margin-left:12px;font-size:12px"></span>
+    </div>`;
+
+  document.getElementById('settings-save').addEventListener('click', saveSettings);
+}
+
+async function saveSettings() {
+  const status = document.getElementById('settings-status');
+  const body = {};
+  for (const f of SETTINGS_FIELDS) {
+    body[f.key] = document.getElementById('set-' + f.key).value;
+  }
+  status.style.color = 'var(--muted)';
+  status.textContent = 'Saving…';
+  try {
+    const resp = await fetch('/api/config', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+    const data = await resp.json();
+    if (resp.ok) {
+      status.style.color = 'var(--green)';
+      status.textContent = '✓ Saved — applies next cycle';
+    } else {
+      status.style.color = 'var(--red)';
+      status.textContent = (data.errors || [data.error || 'save failed']).join('; ');
+    }
+  } catch (e) {
+    status.style.color = 'var(--red)';
+    status.textContent = 'Network error — not saved';
+  }
+}
+
 // ── Boot ──────────────────────────────────────────────────────────────
 initTabs();
 initGlossary();
@@ -839,9 +914,14 @@ loadMarket();       // always pre-load market on boot
 refreshAll();
 setInterval(tick, 1000);
 
-// Switch to decisions tab auto-loads
+// Tab click: refresh data tabs; settings loads once on open (not on the
+// auto-refresh timer, so in-progress edits are never overwritten)
 document.querySelectorAll('nav.tabs button').forEach(btn => {
-  btn.addEventListener('click', () => { countdown = 15; refreshAll(); });
+  btn.addEventListener('click', () => {
+    countdown = 15;
+    if (btn.dataset.tab === 'settings') { loadSettings(); return; }
+    refreshAll();
+  });
 });
 """
 
@@ -871,6 +951,7 @@ _DASHBOARD_BODY = """
   <button data-tab="proposals">Proposals</button>
   <button data-tab="log">Log</button>
   <button data-tab="pnl">P&amp;L</button>
+  <button data-tab="settings">Settings</button>
 </nav>
 
 <div id="tab-market" class="tab-pane active">
@@ -893,6 +974,10 @@ _DASHBOARD_BODY = """
   <div id="pnl-stats" class="pnl-stats-row"><div class="empty-msg" style="padding:0">Loading…</div></div>
   <div id="pnl-chart-wrap" class="pnl-chart-outer" style="margin-top:4px"></div>
   <div id="pnl-table-wrap" class="pnl-table-wrap"></div>
+</div>
+
+<div id="tab-settings" class="tab-pane">
+  <div id="settings-wrap"><div class="empty-msg">Loading…</div></div>
 </div>
 
 <!-- Detail drawer -->
@@ -946,6 +1031,7 @@ def create_app(
     cache: GEXCache | None = None,
     dashboard_token: str = "",
     position_store: PositionStore | None = None,
+    config: LiveConfig | None = None,
 ) -> web.Application:
     reader = telemetry_reader or TelemetryReader()
 
@@ -1079,6 +1165,27 @@ def create_app(
         out.sort(key=lambda t: t["confidence"], reverse=True)
         return _json_response(out)
 
+    # ── Config API ──────────────────────────────────────────────────────
+    async def get_config(req: web.Request) -> web.Response:
+        if config is None:
+            return _json_response({"error": "runtime config not enabled"}, status=404)
+        return _json_response(config.to_dict())
+
+    async def update_config(req: web.Request) -> web.Response:
+        if config is None:
+            return _json_response({"error": "runtime config not enabled"}, status=404)
+        try:
+            body = await req.json()
+        except Exception:
+            return _json_response({"error": "invalid JSON body"}, status=400)
+        if not isinstance(body, dict):
+            return _json_response({"error": "expected a JSON object"}, status=400)
+        errors = config.update(body)
+        if errors:
+            return _json_response({"errors": errors, "config": config.to_dict()}, status=400)
+        logger.info("Config updated via dashboard: %s", config.to_dict())
+        return _json_response({"status": "saved", "config": config.to_dict()})
+
     # ── Telemetry API ───────────────────────────────────────────────────
     async def telemetry_summary(req: web.Request) -> web.Response:
         return _json_response(reader.summary_last_hour())
@@ -1102,6 +1209,8 @@ def create_app(
     app.router.add_get("/api/decisions", list_decisions)
     app.router.add_get("/api/decisions/{run_id}", get_decision)
     app.router.add_get("/api/market", market_snapshot)
+    app.router.add_get("/api/config", get_config)
+    app.router.add_post("/api/config", update_config)
     app.router.add_get("/api/telemetry/summary", telemetry_summary)
     app.router.add_get("/api/telemetry/funnel", telemetry_funnel)
     app.router.add_get("/api/telemetry/recent", telemetry_recent)

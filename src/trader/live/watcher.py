@@ -40,6 +40,7 @@ from .proposals import Proposal, ProposalStore
 
 if TYPE_CHECKING:
     from trader.uw.schemas import FlowAlert
+    from .config import LiveConfig
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +77,7 @@ class FlowWatcher:
         notifier: TelegramNotifier | None = None,
         position_store: PositionStore | None = None,
         risk_engine: RiskEngine | None = None,
+        config: "LiveConfig | None" = None,
     ) -> None:
         self.uw_tools = uw_tools
         self.cache = cache
@@ -95,6 +97,7 @@ class FlowWatcher:
         )
         self._notifier = notifier
         self._position_store = position_store
+        self._config = config
         # dedup by (ticker, expiry, strike, type, created_at) — dict preserves
         # insertion order so trimming drops the oldest keys, not arbitrary ones
         self._seen: dict[str, None] = {}
@@ -116,6 +119,8 @@ class FlowWatcher:
             await asyncio.sleep(self.poll_interval)
 
     async def _poll(self) -> None:
+        if self._config is not None:
+            self._trigger.min_premium = self._config.flow_min_premium
         t0 = _time.monotonic()
         try:
             raw = await self.uw_tools["get_flow_alerts"].ainvoke({"limit": 100})

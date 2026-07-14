@@ -267,6 +267,45 @@ class TestResolveOptionId:
         result = await executor._resolve_option_id(_make_contract())
         assert result == "from-list"
 
+    async def test_unwraps_mcp_content_envelope(self):
+        # Regression: the raw MCP envelope [{'type','text','id':'lc_...'}] was
+        # treated as the instruments list, sending the langchain block id to
+        # Robinhood as the option_id.
+        import json as _json
+        envelope = [{
+            "type": "text",
+            "text": _json.dumps({"data": {"results": [{"id": FAKE_OPTION_ID}]}}),
+            "id": "lc_deadbeef-0000-0000-0000-000000000000",
+        }]
+        rh = _rh_tools(instruments_response=envelope)
+        executor = Executor(
+            mode=ExecutionMode.AUTONOMOUS,
+            account_number=ACCOUNT,
+            rh_tools=rh,
+        )
+        result = await executor._resolve_option_id(_make_contract())
+        assert result == FAKE_OPTION_ID
+
+    async def test_handles_nested_data_results(self):
+        rh = _rh_tools(instruments_response={"data": {"results": [{"id": "nested"}]}})
+        executor = Executor(
+            mode=ExecutionMode.AUTONOMOUS,
+            account_number=ACCOUNT,
+            rh_tools=rh,
+        )
+        result = await executor._resolve_option_id(_make_contract())
+        assert result == "nested"
+
+    async def test_raises_when_items_lack_id(self):
+        rh = _rh_tools(instruments_response=[{"not_id": "x"}])
+        executor = Executor(
+            mode=ExecutionMode.AUTONOMOUS,
+            account_number=ACCOUNT,
+            rh_tools=rh,
+        )
+        with pytest.raises(ValueError, match="No active option instrument"):
+            await executor._resolve_option_id(_make_contract())
+
 
 # ---------------------------------------------------------------------------
 # _build_order_params
@@ -348,6 +387,20 @@ class TestBuildOrderParams:
 
 
 class TestAutonomous:
+    async def test_place_response_without_order_id_reports_not_placed(self):
+        # An error payload from place_option_order has no order id; claiming
+        # placed=True would create a phantom tracked position.
+        rh = _rh_tools(place_response={"errors": ["rejected upstream"]})
+        executor = Executor(
+            mode=ExecutionMode.AUTONOMOUS,
+            account_number=ACCOUNT,
+            rh_tools=rh,
+        )
+        result = await executor.execute(_make_candidate())
+        assert result.placed is False
+        assert result.order_id is None
+        assert "no_order_id_in_response" in (result.rejection_reason or "")
+
     async def test_places_order_when_no_blocking_alerts(self):
         rh = _rh_tools()
         executor = Executor(

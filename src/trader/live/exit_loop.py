@@ -42,8 +42,22 @@ _IDLE_SLEEP = 120
 
 def _extract_order_id(result: object) -> str | None:
     if isinstance(result, dict):
-        return result.get("id") or result.get("order_id")
+        inner = result.get("data", result)
+        if isinstance(inner, dict):
+            return inner.get("id") or inner.get("order_id")
     return None
+
+
+def _extract_items(result: object) -> list:
+    """Pull a result list out of an RH payload, handling {"data": {...}} nesting."""
+    if isinstance(result, dict):
+        inner = result.get("data", result)
+        if isinstance(inner, dict):
+            inner = inner.get("results", inner.get("instruments", []))
+        return inner if isinstance(inner, list) else []
+    if isinstance(result, list):
+        return result
+    return []
 
 
 class ExitLoop:
@@ -226,14 +240,12 @@ class ExitLoop:
 
     def _parse_equity_quotes(self, result: object, tickers: list[str]) -> dict[str, Decimal]:
         prices: dict[str, Decimal] = {}
-        items: list = []
-        if isinstance(result, list):
-            items = result
-        elif isinstance(result, dict):
-            items = result.get("results", result.get("data", []))
-            if not items:
+        items = _extract_items(result)
+        if not items and isinstance(result, dict):
+            inner = result.get("data", result)
+            if isinstance(inner, dict):
                 for t in tickers:
-                    v = result.get(t) or result.get(t.lower())
+                    v = inner.get(t) or inner.get(t.lower())
                     if v is not None:
                         try:
                             prices[t] = Decimal(str(v))
@@ -272,11 +284,10 @@ class ExitLoop:
             return None, dte
 
     def _parse_option_mid(self, result: object) -> Decimal | None:
-        items: list = []
-        if isinstance(result, list):
-            items = result
-        elif isinstance(result, dict):
-            items = result.get("results", result.get("data", [result]))
+        items = _extract_items(result)
+        if not items and isinstance(result, dict):
+            inner = result.get("data", result)
+            items = [inner] if isinstance(inner, dict) else []
         for item in items:
             if not isinstance(item, dict):
                 continue
@@ -303,14 +314,11 @@ class ExitLoop:
             "type": pos.contract.type,
             "state": "active",
         })
-        instruments: list = []
-        if isinstance(result, dict):
-            instruments = result.get("results", result.get("data", []))
-        elif isinstance(result, list):
-            instruments = result
-        if not instruments:
+        instruments = _extract_items(result)
+        if not instruments or not isinstance(instruments[0], dict) or "id" not in instruments[0]:
             raise ValueError(
                 f"No active instrument: {pos.contract.ticker} "
-                f"{pos.contract.expiry} {pos.contract.strike} {pos.contract.type}"
+                f"{pos.contract.expiry} {pos.contract.strike} {pos.contract.type} "
+                f"(response: {str(result)[:200]})"
             )
         return instruments[0]["id"]

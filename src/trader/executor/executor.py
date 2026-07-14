@@ -61,8 +61,23 @@ def _get_blocking_alerts(review: Any) -> list[str]:
 
 def _extract_order_id(result: Any) -> str | None:
     if isinstance(result, dict):
-        return result.get("id") or result.get("order_id")
+        inner = result.get("data", result)
+        if isinstance(inner, dict):
+            return inner.get("id") or inner.get("order_id")
     return None
+
+
+def _extract_instruments(result: Any) -> list:
+    """Pull the instrument list out of a get_option_instruments payload,
+    handling the {"data": {"results": [...]}} nesting RH responses use."""
+    if isinstance(result, dict):
+        inner = result.get("data", result)
+        if isinstance(inner, dict):
+            inner = inner.get("results", inner.get("instruments", []))
+        return inner if isinstance(inner, list) else []
+    if isinstance(result, list):
+        return result
+    return []
 
 
 # ---------------------------------------------------------------------------
@@ -193,15 +208,12 @@ class Executor:
             "type": contract.type,
             "state": "active",
         })
-        instruments: list = []
-        if isinstance(result, dict):
-            instruments = result.get("results", result.get("data", []))
-        elif isinstance(result, list):
-            instruments = result
-        if not instruments:
+        instruments = _extract_instruments(result)
+        if not instruments or not isinstance(instruments[0], dict) or "id" not in instruments[0]:
             raise ValueError(
                 f"No active option instrument: "
-                f"{contract.ticker} {contract.expiry} {contract.strike} {contract.type}"
+                f"{contract.ticker} {contract.expiry} {contract.strike} {contract.type} "
+                f"(response: {str(result)[:200]})"
             )
         return instruments[0]["id"]
 
@@ -273,7 +285,28 @@ class Executor:
 
         place_params = self._build_order_params(request, option_id, for_review=False)
         place_result = await rh_call(self.rh_tools, "place_option_order", place_params)
+        return self._place_outcome(request, place_result, review_summary)
+
+    def _place_outcome(
+        self, request: OrderRequest, place_result: Any, review_summary: str
+    ) -> OrderResult:
+        """Build the OrderResult for a place_option_order response.
+
+        A successful placement always carries an order id; without one the
+        response is an error payload and reporting placed=True would create a
+        phantom tracked position.
+        """
         order_id = _extract_order_id(place_result)
+        if order_id is None:
+            logger.error("%s place_option_order returned no order id: %s",
+                         request.candidate.ticker, str(place_result)[:300])
+            return OrderResult(
+                request=request,
+                placed=False,
+                rejection_reason=f"no_order_id_in_response: {str(place_result)[:200]}",
+                review_summary=review_summary,
+                timestamp=datetime.now(timezone.utc),
+            )
         logger.info("%s placed order_id=%s", request.candidate.ticker, order_id)
         return OrderResult(
             request=request,
@@ -306,12 +339,4 @@ class Executor:
 
         place_params = self._build_order_params(request, option_id, for_review=False)
         place_result = await rh_call(self.rh_tools, "place_option_order", place_params)
-        order_id = _extract_order_id(place_result)
-        logger.info("%s autonomous placed order_id=%s", request.candidate.ticker, order_id)
-        return OrderResult(
-            request=request,
-            placed=True,
-            order_id=order_id,
-            review_summary=review_summary,
-            timestamp=datetime.now(timezone.utc),
-        )
+        return self._place_outcome(request, place_result, review_summary)

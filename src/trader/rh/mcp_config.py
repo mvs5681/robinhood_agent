@@ -186,16 +186,36 @@ async def reload_rh_tools(rh_tools: dict[str, BaseTool]) -> None:
 # Retry helper
 # ---------------------------------------------------------------------------
 
+def unwrap_mcp(result: object) -> object:
+    """Unwrap the langchain MCP content envelope to the tool's JSON payload.
+
+    MCP tools return [{'type': 'text', 'text': '<json>', 'id': 'lc_...'}].
+    Callers that index into the raw envelope get langchain block metadata —
+    e.g. treating the envelope as an instruments list once sent the block's
+    'lc_...' id to Robinhood as an option_id. Non-envelope values pass through.
+    """
+    if (
+        isinstance(result, list) and result
+        and isinstance(result[0], dict) and "text" in result[0]
+    ):
+        try:
+            return json.loads(result[0]["text"])
+        except (ValueError, TypeError):
+            pass
+    return result
+
+
 async def rh_call(rh_tools: dict[str, BaseTool], name: str, params: dict):
     """
     Call an RH MCP tool by name, retrying once after a token refresh on 401.
+    Returns the unwrapped JSON payload, not the MCP content envelope.
     Use this instead of rh_tools[name].ainvoke(params) directly.
     """
     try:
-        return await rh_tools[name].ainvoke(params)
+        return unwrap_mcp(await rh_tools[name].ainvoke(params))
     except Exception as exc:
         if "401" in str(exc) or "unauthorized" in str(exc).lower():
             logger.warning("RH 401 on %s — refreshing token and retrying", name)
             await reload_rh_tools(rh_tools)
-            return await rh_tools[name].ainvoke(params)
+            return unwrap_mcp(await rh_tools[name].ainvoke(params))
         raise

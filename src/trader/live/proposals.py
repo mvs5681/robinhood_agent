@@ -154,6 +154,19 @@ class ProposalStore:
         async with self._lock:
             return self._proposals.get(proposal_id)
 
+    async def has_recent(self, ticker: str) -> bool:
+        """True if any proposal for this ticker was created within the TTL
+        window, regardless of status. Gates re-proposing the same signal:
+        every new whale print re-runs the pipeline, and without this a hot
+        ticker mints a duplicate proposal (and notification) per print."""
+        now = datetime.now(timezone.utc)
+        async with self._lock:
+            return any(
+                p.candidate.ticker == ticker
+                and (now - p.created_at).total_seconds() <= self.TTL_SECONDS
+                for p in self._proposals.values()
+            )
+
     async def list_pending(self) -> list[Proposal]:
         now = datetime.now(timezone.utc)
         async with self._lock:

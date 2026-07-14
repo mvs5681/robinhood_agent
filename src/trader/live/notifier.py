@@ -103,21 +103,21 @@ class TelegramNotifier:
 
     async def notify_proposal(self, proposal: Proposal) -> None:
         """Send notification message with Approve / Reject inline buttons."""
-        text = self._proposal_text(proposal, status="pending")
-        keyboard = {
-            "inline_keyboard": [[
-                {"text": "Approve", "callback_data": f"approve:{proposal.proposal_id}"},
-                {"text": "Reject",  "callback_data": f"reject:{proposal.proposal_id}"},
-            ]]
-        }
-        payload = {
-            "chat_id": self._chat_id,
-            "text": text,
-            "parse_mode": "HTML",
-            "disable_web_page_preview": True,
-            "reply_markup": keyboard,
-        }
         try:
+            text = self._proposal_text(proposal, status="pending")
+            keyboard = {
+                "inline_keyboard": [[
+                    {"text": "Approve", "callback_data": f"approve:{proposal.proposal_id}"},
+                    {"text": "Reject",  "callback_data": f"reject:{proposal.proposal_id}"},
+                ]]
+            }
+            payload = {
+                "chat_id": self._chat_id,
+                "text": text,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True,
+                "reply_markup": keyboard,
+            }
             async with aiohttp.ClientSession() as session:
                 async with session.post(
                     _url(self._token, "sendMessage"),
@@ -131,9 +131,10 @@ class TelegramNotifier:
                         logger.debug("Telegram notification sent: proposal=%s msg=%d",
                                      proposal.proposal_id, msg_id)
                     else:
-                        logger.warning("Telegram sendMessage error: %s", body)
+                        logger.error("Telegram sendMessage error: %s", body)
         except Exception as exc:
-            logger.warning("Failed to send Telegram notification: %s", exc)
+            logger.error("Failed to send Telegram notification for %s: %s",
+                         proposal.proposal_id, exc)
 
     async def _edit_message(self, proposal_id: str, text: str, *, final: bool = False) -> None:
         """Edit the original notification message in-place.
@@ -368,8 +369,8 @@ class TelegramNotifier:
         c = proposal.candidate
         sc = c.selected_contract
         score = c.blend_scores.composite if c.blend_scores else 0.0
-        regime = c.gex_setup.regime if c.gex_setup else "—"
-        direction = c.gex_setup.direction if c.gex_setup else "—"
+        regime = c.gex_setup.regime.value if c.gex_setup else "—"
+        direction = c.gex_setup.candidate_direction if c.gex_setup else "—"
         strike = sc.strike if sc else "?"
         expiry = sc.expiry if sc else "?"
         delta = f"{sc.delta:.2f}" if sc and sc.delta is not None else "—"

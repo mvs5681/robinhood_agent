@@ -225,6 +225,19 @@ class FlowWatcher:
             logger.debug("%s: no proposed candidates after pipeline", ticker)
             return
 
+        # One live signal per ticker: skip if a proposal for this ticker is
+        # already within its TTL window (every new whale print re-runs the
+        # pipeline — without this, a hot ticker mints a duplicate proposal
+        # and Telegram ping per print) or if a position is already open.
+        if await self.proposal_store.has_recent(ticker):
+            logger.debug("%s: proposal already exists within TTL — skipping duplicate", ticker)
+            return
+        if self._position_store is not None and any(
+            p.ticker == ticker for p in await self._position_store.all()
+        ):
+            logger.debug("%s: open position exists — skipping new entry", ticker)
+            return
+
         for candidate in proposed:
             if self.mode == ExecutionMode.PROPOSE_ONLY:
                 proposal = await self.proposal_store.add(candidate, run_id=run_id)

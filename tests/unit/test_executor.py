@@ -286,7 +286,7 @@ class TestBuildOrderParams:
 
     def test_buy_to_open_maps_to_buy_open(self):
         executor = Executor(mode=ExecutionMode.AUTONOMOUS, account_number=ACCOUNT)
-        params = executor._build_order_params(self._make_request(), FAKE_OPTION_ID)
+        params = executor._build_order_params(self._make_request(), FAKE_OPTION_ID, for_review=True)
         leg = params["legs"][0]
         assert leg["side"] == "buy"
         assert leg["position_effect"] == "open"
@@ -295,36 +295,49 @@ class TestBuildOrderParams:
         executor = Executor(mode=ExecutionMode.AUTONOMOUS, account_number=ACCOUNT)
         request = self._make_request()
         request = request.model_copy(update={"action": "sell_to_close"})
-        params = executor._build_order_params(request, FAKE_OPTION_ID)
+        params = executor._build_order_params(request, FAKE_OPTION_ID, for_review=True)
         leg = params["legs"][0]
         assert leg["side"] == "sell"
         assert leg["position_effect"] == "close"
 
     def test_quantity_and_price_encoded_as_strings(self):
         executor = Executor(mode=ExecutionMode.AUTONOMOUS, account_number=ACCOUNT)
-        params = executor._build_order_params(self._make_request(), FAKE_OPTION_ID)
+        params = executor._build_order_params(self._make_request(), FAKE_OPTION_ID, for_review=True)
         assert params["quantity"] == "2"
         assert params["price"] == "3.00"
 
     def test_account_number_included(self):
         executor = Executor(mode=ExecutionMode.AUTONOMOUS, account_number=ACCOUNT)
-        params = executor._build_order_params(self._make_request(), FAKE_OPTION_ID)
+        params = executor._build_order_params(self._make_request(), FAKE_OPTION_ID, for_review=True)
         assert params["account_number"] == ACCOUNT
 
-    def test_chain_symbol_and_underlying_type_included(self):
+    def test_review_params_have_chain_symbol_but_no_ref_id(self):
+        # review_option_order schema accepts chain_symbol/underlying_type but
+        # rejects ref_id (additionalProperties: false)
         executor = Executor(mode=ExecutionMode.AUTONOMOUS, account_number=ACCOUNT)
-        params = executor._build_order_params(self._make_request(), FAKE_OPTION_ID)
+        params = executor._build_order_params(self._make_request(), FAKE_OPTION_ID, for_review=True)
         assert params["chain_symbol"] == "AAPL"
         assert params["underlying_type"] == "equity"
+        assert "ref_id" not in params
+
+    def test_place_params_have_ref_id_but_no_chain_symbol(self):
+        # place_option_order schema accepts ref_id but rejects
+        # chain_symbol/underlying_type (additionalProperties: false)
+        executor = Executor(mode=ExecutionMode.AUTONOMOUS, account_number=ACCOUNT)
+        request = self._make_request()
+        params = executor._build_order_params(request, FAKE_OPTION_ID, for_review=False)
+        assert params["ref_id"] == request.ref_id
+        assert "chain_symbol" not in params
+        assert "underlying_type" not in params
 
     def test_option_id_in_leg(self):
         executor = Executor(mode=ExecutionMode.AUTONOMOUS, account_number=ACCOUNT)
-        params = executor._build_order_params(self._make_request(), FAKE_OPTION_ID)
+        params = executor._build_order_params(self._make_request(), FAKE_OPTION_ID, for_review=True)
         assert params["legs"][0]["option_id"] == FAKE_OPTION_ID
 
     def test_order_type_is_limit_gfd(self):
         executor = Executor(mode=ExecutionMode.AUTONOMOUS, account_number=ACCOUNT)
-        params = executor._build_order_params(self._make_request(), FAKE_OPTION_ID)
+        params = executor._build_order_params(self._make_request(), FAKE_OPTION_ID, for_review=True)
         assert params["type"] == "limit"
         assert params["time_in_force"] == "gfd"
 
@@ -396,7 +409,7 @@ class TestAutonomous:
         result = await executor.execute(_make_candidate())
         assert result.review_summary is not None
 
-    async def test_review_and_place_called_with_same_params(self):
+    async def test_review_and_place_params_match_their_schemas(self):
         rh = _rh_tools()
         executor = Executor(
             mode=ExecutionMode.AUTONOMOUS,
@@ -407,7 +420,12 @@ class TestAutonomous:
 
         review_params = rh["review_option_order"].ainvoke.call_args[0][0]
         place_params = rh["place_option_order"].ainvoke.call_args[0][0]
-        assert review_params == place_params
+        # shared order fields identical
+        for key in ("account_number", "quantity", "legs", "type", "time_in_force", "price"):
+            assert review_params[key] == place_params[key]
+        # endpoint-specific fields: strict MCP schemas reject the others'
+        assert "ref_id" not in review_params and "chain_symbol" in review_params
+        assert "ref_id" in place_params and "chain_symbol" not in place_params
 
     async def test_result_timestamp_is_utc(self):
         rh = _rh_tools()

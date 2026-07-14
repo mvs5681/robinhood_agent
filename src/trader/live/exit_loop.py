@@ -17,6 +17,7 @@ import time as _time
 from datetime import date
 from decimal import Decimal
 from typing import TYPE_CHECKING
+from uuid import NAMESPACE_OID, uuid5
 
 from trader.exits.monitor import ExitMonitor
 from trader.exits.schemas import ExitReason, ExitSignal, Position
@@ -163,8 +164,10 @@ class ExitLoop:
                     "type": "limit",
                     "time_in_force": "gfd",
                     "price": f"{float(price):.2f}",
-                    "chain_symbol": pos.ticker,
-                    "underlying_type": "equity",
+                    # Stable per position+reason: a retry after a transient
+                    # failure (position stays in the store, next tick retries)
+                    # is idempotent instead of double-selling
+                    "ref_id": str(uuid5(NAMESPACE_OID, f"{pos.position_id}:{signal.reason.value}")),
                 }
                 result = await rh_call(self._rh_tools, "place_option_order", params)
                 order_id = _extract_order_id(result)

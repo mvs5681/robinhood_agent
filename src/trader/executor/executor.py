@@ -205,8 +205,16 @@ class Executor:
             )
         return instruments[0]["id"]
 
-    def _build_order_params(self, request: OrderRequest, option_id: str) -> dict[str, Any]:
-        """Build the parameter dict shared by review_option_order and place_option_order."""
+    def _build_order_params(
+        self, request: OrderRequest, option_id: str, *, for_review: bool
+    ) -> dict[str, Any]:
+        """Build parameters for review_option_order or place_option_order.
+
+        The two MCP tools have strict schemas (additionalProperties: false)
+        that differ: review accepts chain_symbol/underlying_type (enables the
+        fee + collateral fetch) but rejects ref_id; place accepts ref_id (the
+        idempotency key) but rejects chain_symbol/underlying_type.
+        """
         contract = request.candidate.selected_contract
         side = "buy" if request.action == "buy_to_open" else "sell"
         position_effect = "open" if request.action.endswith("_to_open") else "close"
@@ -219,10 +227,12 @@ class Executor:
         }
         if request.limit_price is not None:
             params["price"] = f"{float(request.limit_price):.2f}"
-        if contract is not None:
-            params["chain_symbol"] = contract.ticker
-            params["underlying_type"] = "equity"
-        params["ref_id"] = request.ref_id
+        if for_review:
+            if contract is not None:
+                params["chain_symbol"] = contract.ticker
+                params["underlying_type"] = "equity"
+        else:
+            params["ref_id"] = request.ref_id
         return params
 
     async def _rh_approval(self, request: OrderRequest, option_id: str) -> OrderResult:
@@ -233,9 +243,9 @@ class Executor:
         The graph must be resumed with the human's response ('approve' to proceed,
         anything else to reject). Requires a LangGraph checkpointer to be configured.
         """
-        params = self._build_order_params(request, option_id)
+        review_params = self._build_order_params(request, option_id, for_review=True)
 
-        review_result = await rh_call(self.rh_tools, "review_option_order", params)
+        review_result = await rh_call(self.rh_tools, "review_option_order", review_params)
         review_summary = _summarize_review(review_result)
         logger.info("%s rh_approval review: %s", request.candidate.ticker, review_summary)
 
@@ -261,7 +271,8 @@ class Executor:
                 timestamp=datetime.now(timezone.utc),
             )
 
-        place_result = await rh_call(self.rh_tools, "place_option_order", params)
+        place_params = self._build_order_params(request, option_id, for_review=False)
+        place_result = await rh_call(self.rh_tools, "place_option_order", place_params)
         order_id = _extract_order_id(place_result)
         logger.info("%s placed order_id=%s", request.candidate.ticker, order_id)
         return OrderResult(
@@ -277,9 +288,9 @@ class Executor:
         Review the order with RH and place immediately if no fatal alerts are found.
         No human confirmation step — runs fully within the pipeline.
         """
-        params = self._build_order_params(request, option_id)
+        review_params = self._build_order_params(request, option_id, for_review=True)
 
-        review_result = await rh_call(self.rh_tools, "review_option_order", params)
+        review_result = await rh_call(self.rh_tools, "review_option_order", review_params)
         review_summary = _summarize_review(review_result)
 
         blocking = _get_blocking_alerts(review_result)
@@ -293,7 +304,8 @@ class Executor:
                 timestamp=datetime.now(timezone.utc),
             )
 
-        place_result = await rh_call(self.rh_tools, "place_option_order", params)
+        place_params = self._build_order_params(request, option_id, for_review=False)
+        place_result = await rh_call(self.rh_tools, "place_option_order", place_params)
         order_id = _extract_order_id(place_result)
         logger.info("%s autonomous placed order_id=%s", request.candidate.ticker, order_id)
         return OrderResult(

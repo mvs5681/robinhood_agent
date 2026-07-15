@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-07-15 11:20 EDT
+
+- **Fix order-id extraction for the live place response** (first real order!)
+  — the first approved order (HOOD $130c 8/14, $4.20 limit) placed
+  successfully at Robinhood but was misreported as failed and left untracked:
+  `place_option_order` nests the order at `data.order.id`, one level deeper
+  than the extractor checked. Regression test uses the exact live response
+  shape. Until the container restarts and reconciles, a fill of that order is
+  unmonitored — restart promptly after this fix.
+
 ## 2026-07-14 15:35 EDT — Deployment, bug-fix, and hardening sweep (Jul 12–14)
 
 Covers all changes since the live agent was containerized. Ordered newest first.

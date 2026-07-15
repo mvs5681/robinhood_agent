@@ -43,6 +43,8 @@ _IDLE_SLEEP = 120
 def _extract_order_id(result: object) -> str | None:
     if isinstance(result, dict):
         inner = result.get("data", result)
+        if isinstance(inner, dict) and isinstance(inner.get("order"), dict):
+            inner = inner["order"]  # place_option_order: {"data": {"order": {"id": ...}}}
         if isinstance(inner, dict):
             return inner.get("id") or inner.get("order_id")
     return None

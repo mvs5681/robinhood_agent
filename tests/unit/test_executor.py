@@ -387,6 +387,24 @@ class TestBuildOrderParams:
 
 
 class TestAutonomous:
+    async def test_extracts_order_id_from_live_place_response_shape(self):
+        # Exact nesting from the live RH MCP place_option_order response —
+        # the first real order was misreported as not-placed because the id
+        # lives at data.order.id, not data.id.
+        rh = _rh_tools(place_response={"data": {"order": {
+            "id": "6a57a2c5-ba56-40c3-9624-d0862beda75d",
+            "chain_symbol": "HOOD", "state": "unconfirmed", "type": "limit",
+            "legs": [{"option_id": "186ed0b7", "side": "buy", "position_effect": "open"}],
+        }}})
+        executor = Executor(
+            mode=ExecutionMode.AUTONOMOUS,
+            account_number=ACCOUNT,
+            rh_tools=rh,
+        )
+        result = await executor.execute(_make_candidate())
+        assert result.placed is True
+        assert result.order_id == "6a57a2c5-ba56-40c3-9624-d0862beda75d"
+
     async def test_place_response_without_order_id_reports_not_placed(self):
         # An error payload from place_option_order has no order id; claiming
         # placed=True would create a phantom tracked position.

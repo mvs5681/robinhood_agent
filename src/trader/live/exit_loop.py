@@ -255,12 +255,14 @@ class ExitLoop:
         for item in items:
             if not isinstance(item, dict):
                 continue
-            symbol = (item.get("symbol") or item.get("ticker") or "").upper()
+            # get_equity_quotes nests fields under "quote": results[].quote.last_trade_price
+            q = item.get("quote") if isinstance(item.get("quote"), dict) else item
+            symbol = (q.get("symbol") or q.get("ticker") or "").upper()
             raw = (
-                item.get("last_trade_price")
-                or item.get("ask_price")
-                or item.get("bid_price")
-                or item.get("price")
+                q.get("last_trade_price")
+                or q.get("ask_price")
+                or q.get("bid_price")
+                or q.get("price")
             )
             if symbol and raw:
                 try:
@@ -276,7 +278,7 @@ class ExitLoop:
         try:
             instrument_id = pos.option_instrument_id or await self._resolve_instrument_id(pos)
             result = await rh_call(self._rh_tools, "get_option_quotes",
-                                   {"option_ids": [instrument_id]})
+                                   {"instrument_ids": [instrument_id]})
             mid = self._parse_option_mid(result)
             return mid, dte
         except Exception as exc:
@@ -291,14 +293,16 @@ class ExitLoop:
         for item in items:
             if not isinstance(item, dict):
                 continue
-            mid = item.get("mid_price") or item.get("mark_price")
+            # get_option_quotes nests fields under "quote": results[].quote.mark_price
+            q = item.get("quote") if isinstance(item.get("quote"), dict) else item
+            mid = q.get("mid_price") or q.get("mark_price")
             if mid is not None:
                 try:
                     return Decimal(str(mid))
                 except Exception:
                     pass
-            bid = item.get("bid_price")
-            ask = item.get("ask_price")
+            bid = q.get("bid_price")
+            ask = q.get("ask_price")
             if bid is not None and ask is not None:
                 try:
                     return (Decimal(str(bid)) + Decimal(str(ask))) / 2

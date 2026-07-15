@@ -1,5 +1,20 @@
 # Changelog
 
+## 2026-07-15 12:05 EDT
+
+- **Order lifecycle manager** (`live/order_manager.py`) — placement is no
+  longer fire-and-forget. A new polling loop (20s) tracks every placed buy:
+  positions are only created on **actual fill** (with the true average fill
+  premium, not the requested limit); an order unfilled for 2 minutes is
+  cancelled and re-placed stepping toward the ask (fresh mid → mid/ask
+  midpoint → ask, max 3 replacements, always capped at the risk engine's
+  $500-per-contract premium); after 10 minutes total it cancels for good and
+  notifies. At startup, still-working agentic buy orders from before the
+  restart are adopted so a post-restart fill still becomes a monitored
+  position (closes the working-order reconciliation TODO). Telegram messages
+  on fill and on give-up. `cancel_option_order` added to the RH tool
+  allowlist.
+
 ## 2026-07-15 11:20 EDT
 
 - **Fix order-id extraction for the live place response** (first real order!)

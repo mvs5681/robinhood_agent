@@ -37,6 +37,7 @@ if TYPE_CHECKING:
     from trader.executor.executor import Executor
     from .cache import GEXCache
     from .config import LiveConfig
+    from .order_manager import OrderLifecycleManager
     from .position_store import PositionStore
 
 logger = logging.getLogger(__name__)
@@ -1032,6 +1033,7 @@ def create_app(
     dashboard_token: str = "",
     position_store: PositionStore | None = None,
     config: LiveConfig | None = None,
+    order_manager: OrderLifecycleManager | None = None,
 ) -> web.Application:
     reader = telemetry_reader or TelemetryReader()
 
@@ -1099,13 +1101,17 @@ def create_app(
                     review_summary=result.review_summary,
                     duration_ms=ms,
                 )
-            if result.placed and position_store is not None:
-                from .position_store import make_position
-                pos = make_position(proposal.candidate, result, result.request.quantity)
-                if pos:
-                    await position_store.add(pos)
-                    logger.info("Position tracked %s position_id=%s",
-                                proposal.candidate.ticker, pos.position_id)
+            if result.placed:
+                if order_manager is not None:
+                    # Lifecycle manager promotes to a tracked position on fill
+                    await order_manager.track(proposal.candidate, result)
+                elif position_store is not None:
+                    from .position_store import make_position
+                    pos = make_position(proposal.candidate, result, result.request.quantity)
+                    if pos:
+                        await position_store.add(pos)
+                        logger.info("Position tracked %s position_id=%s",
+                                    proposal.candidate.ticker, pos.position_id)
             await proposal_store.mark_executed(pid, result)
             return _json_response({"status": "executed", "placed": result.placed, "order_id": result.order_id})
         except Exception as exc:

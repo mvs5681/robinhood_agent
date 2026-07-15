@@ -43,6 +43,7 @@ from trader.live.cache import GEXCache
 from trader.live.config import LiveConfig
 from trader.live.exit_loop import ExitLoop
 from trader.live.notifier import TelegramNotifier
+from trader.live.order_manager import OrderLifecycleManager
 from trader.live.position_store import PositionStore
 from trader.live.proposals import ProposalStore
 from trader.live.reconciler import reconcile_positions
@@ -181,6 +182,18 @@ async def main() -> None:
     # Position cap reads live from PositionStore so exits free up slots
     risk_engine = RiskEngine(open_positions_fn=lambda: position_store.count)
 
+    # Order lifecycle: fill promotion, reprice-toward-ask, give-up cancel
+    order_manager: OrderLifecycleManager | None = None
+    if mode != ExecutionMode.PROPOSE_ONLY and rh_tools:
+        order_manager = OrderLifecycleManager(
+            rh_tools=rh_tools,
+            position_store=position_store,
+            account_number=account_number,
+            notifier=notifier,
+            tel=tel,
+            max_premium_per_contract=risk_engine.params.max_premium_per_trade,
+        )
+
     max_trade_spend_raw = os.environ.get("MAX_TRADE_SPEND", "")
     max_trade_spend = Decimal(max_trade_spend_raw) if max_trade_spend_raw else None
 
@@ -212,6 +225,7 @@ async def main() -> None:
         position_store=position_store,
         risk_engine=risk_engine,
         config=config,
+        order_manager=order_manager,
     )
 
     exit_loop = ExitLoop(
@@ -238,6 +252,7 @@ async def main() -> None:
         dashboard_token=dashboard_token,
         position_store=position_store,
         config=config,
+        order_manager=order_manager,
     )
     runner = web.AppRunner(app)
     await runner.setup()
@@ -249,14 +264,22 @@ async def main() -> None:
     if mode != ExecutionMode.PROPOSE_ONLY and account_number and rh_tools:
         await reconcile_positions(rh_tools, position_store, account_number)
 
+    # Adopt agentic orders still working from before the restart, so a fill
+    # after the restart still becomes a monitored position
+    if order_manager is not None and account_number:
+        await order_manager.adopt_working_orders()
+
     # Telegram startup check — sends a test Approve/Reject message so the user
     # can confirm the bot is reachable and interactive before any real trades fire.
     if notifier:
         await notifier.send_startup_check()
 
     coroutines = [scanner.run(), watcher.run(), exit_loop.run()]
+    if order_manager is not None:
+        coroutines.append(order_manager.run())
     if notifier:
-        coroutines.append(notifier.run_poller(proposal_store, executor, tel, position_store))
+        coroutines.append(notifier.run_poller(proposal_store, executor, tel,
+                                              position_store, order_manager))
 
     try:
         await asyncio.gather(*coroutines)

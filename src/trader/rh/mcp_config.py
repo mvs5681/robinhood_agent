@@ -37,6 +37,7 @@ ALLOWED_RH_TOOL_NAMES: frozenset[str] = frozenset([
     "get_option_instruments",
     "review_option_order",
     "place_option_order",
+    "cancel_option_order",
     "get_option_orders",
     "get_accounts",
     "get_option_positions",

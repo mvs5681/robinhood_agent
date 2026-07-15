@@ -41,6 +41,7 @@ from .proposals import Proposal, ProposalStore
 if TYPE_CHECKING:
     from trader.uw.schemas import FlowAlert
     from .config import LiveConfig
+    from .order_manager import OrderLifecycleManager
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +79,7 @@ class FlowWatcher:
         position_store: PositionStore | None = None,
         risk_engine: RiskEngine | None = None,
         config: "LiveConfig | None" = None,
+        order_manager: "OrderLifecycleManager | None" = None,
     ) -> None:
         self.uw_tools = uw_tools
         self.cache = cache
@@ -98,6 +100,7 @@ class FlowWatcher:
         self._notifier = notifier
         self._position_store = position_store
         self._config = config
+        self._order_manager = order_manager
         # dedup by (ticker, expiry, strike, type, created_at) — dict preserves
         # insertion order so trimming drops the oldest keys, not arbitrary ones
         self._seen: dict[str, None] = {}
@@ -277,11 +280,15 @@ class FlowWatcher:
                             review_summary=result.review_summary,
                             duration_ms=ms,
                         )
-                    if result.placed and self._position_store is not None:
-                        pos = make_position(candidate, result, result.request.quantity)
-                        if pos:
-                            await self._position_store.add(pos)
-                            logger.info("Position tracked %s position_id=%s", ticker, pos.position_id)
+                    if result.placed:
+                        if self._order_manager is not None:
+                            # Lifecycle manager promotes to a tracked position on fill
+                            await self._order_manager.track(candidate, result)
+                        elif self._position_store is not None:
+                            pos = make_position(candidate, result, result.request.quantity)
+                            if pos:
+                                await self._position_store.add(pos)
+                                logger.info("Position tracked %s position_id=%s", ticker, pos.position_id)
                     logger.info(
                         "AUTONOMOUS %s placed=%s order_id=%s",
                         ticker, result.placed, result.order_id,

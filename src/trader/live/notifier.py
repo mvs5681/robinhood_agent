@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from trader.executor.executor import Executor
     from trader.exits.schemas import ExitSignal
     from trader.telemetry.logger import TelemetryLogger
+    from .order_manager import OrderLifecycleManager
     from .position_store import PositionStore
     from .proposals import Proposal, ProposalStore
 
@@ -181,6 +182,27 @@ class TelegramNotifier:
     # Incoming poller
     # ------------------------------------------------------------------
 
+    async def notify_text(self, text: str) -> None:
+        """Send a plain informational message (no buttons)."""
+        payload = {
+            "chat_id": self._chat_id,
+            "text": text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+        }
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    _url(self._token, "sendMessage"),
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    body = await resp.json()
+                    if not body.get("ok"):
+                        logger.error("Telegram notify_text error: %s", body)
+        except Exception as exc:
+            logger.error("Failed to send Telegram message: %s", exc)
+
     async def notify_exit(self, signal: "ExitSignal", order_id: str | None) -> None:
         """Send an informational exit message (no approval buttons)."""
         pnl_sign = "+" if signal.pnl_pct >= 0 else ""
@@ -218,6 +240,7 @@ class TelegramNotifier:
         executor: "Executor",
         tel: "TelemetryLogger | None" = None,
         position_store: "PositionStore | None" = None,
+        order_manager: "OrderLifecycleManager | None" = None,
     ) -> None:
         """Long-poll Telegram getUpdates and handle Approve/Reject callbacks."""
         logger.info("Telegram poller started")
@@ -233,7 +256,8 @@ class TelegramNotifier:
             for update in updates:
                 offset = update["update_id"] + 1
                 try:
-                    await self._handle_update(update, proposal_store, executor, tel, position_store)
+                    await self._handle_update(update, proposal_store, executor, tel,
+                                              position_store, order_manager)
                 except Exception as exc:
                     logger.error("Error handling Telegram update %d: %s",
                                  update.get("update_id"), exc)
@@ -262,6 +286,7 @@ class TelegramNotifier:
         executor: "Executor",
         tel: "TelemetryLogger | None",
         position_store: "PositionStore | None" = None,
+        order_manager: "OrderLifecycleManager | None" = None,
     ) -> None:
         cb = update.get("callback_query")
         if not cb:
@@ -338,12 +363,16 @@ class TelegramNotifier:
                         review_summary=result.review_summary,
                         duration_ms=ms,
                     )
-                if result.placed and position_store is not None:
-                    from .position_store import make_position
-                    pos = make_position(proposal.candidate, result, result.request.quantity)
-                    if pos:
-                        await position_store.add(pos)
-                        logger.info("Position tracked %s position_id=%s", proposal.candidate.ticker, pos.position_id)
+                if result.placed:
+                    if order_manager is not None:
+                        # Lifecycle manager promotes to a tracked position on fill
+                        await order_manager.track(proposal.candidate, result)
+                    elif position_store is not None:
+                        from .position_store import make_position
+                        pos = make_position(proposal.candidate, result, result.request.quantity)
+                        if pos:
+                            await position_store.add(pos)
+                            logger.info("Position tracked %s position_id=%s", proposal.candidate.ticker, pos.position_id)
                 await proposal_store.mark_executed(proposal_id, result)
                 status_text = "executed" if result.placed else f"rejected — {result.rejection_reason}"
                 await self._edit_message(

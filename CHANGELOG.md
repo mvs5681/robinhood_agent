@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-07-15 13:05 EDT
+
+- **Round limit prices onto the instrument's tick grid** — the approved TQQQ
+  order was rejected by Robinhood with "Price does not satisfy the min tick
+  value": non-penny options tick in $0.05/$0.10 steps, and the agent priced
+  at the raw bid/ask mid. New `rh/ticks.py::round_price_to_tick` floors every
+  buy, replacement, and exit limit onto the grid using the instrument's
+  `min_ticks` rule (penny fallback when unknown). Executor resolves
+  `min_ticks` with the instrument id; exit loop and order manager fetch it
+  per instrument.
+
 ## 2026-07-15 12:05 EDT
 
 - **Order lifecycle manager** (`live/order_manager.py`) — placement is no

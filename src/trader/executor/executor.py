@@ -20,6 +20,7 @@ from langchain_core.tools import BaseTool
 from langgraph.types import interrupt
 
 from trader.rh.mcp_config import rh_call
+from trader.rh.ticks import round_price_to_tick
 from trader.scoring.schemas import CandidateSignal
 from trader.uw.schemas import OptionContract
 
@@ -147,8 +148,8 @@ class Executor:
         self._check_order_type(request.action)
         if self.mode == ExecutionMode.PROPOSE_ONLY:
             return self._propose(request)
-        option_id = await self._resolve_option_id(contract)
-        return await self._autonomous(request, option_id)
+        option_id, min_ticks = await self._resolve_instrument(contract)
+        return await self._autonomous(request, option_id, min_ticks)
 
     async def execute(self, candidate: CandidateSignal) -> OrderResult:
         """Entry point — build a buy_to_open request and dispatch to the configured mode."""
@@ -169,12 +170,12 @@ class Executor:
         if self.mode == ExecutionMode.PROPOSE_ONLY:
             return self._propose(request)
 
-        option_id = await self._resolve_option_id(contract)
+        option_id, min_ticks = await self._resolve_instrument(contract)
 
         if self.mode == ExecutionMode.RH_APPROVAL:
-            return await self._rh_approval(request, option_id)
+            return await self._rh_approval(request, option_id, min_ticks)
 
-        return await self._autonomous(request, option_id)
+        return await self._autonomous(request, option_id, min_ticks)
 
     # ------------------------------------------------------------------
     # Internal
@@ -201,8 +202,8 @@ class Executor:
             timestamp=datetime.now(timezone.utc),
         )
 
-    async def _resolve_option_id(self, contract: OptionContract) -> str:
-        """Resolve the RH option instrument UUID from contract fields."""
+    async def _resolve_instrument(self, contract: OptionContract) -> tuple[str, dict | None]:
+        """Resolve the RH instrument UUID and its min_ticks tick-grid rule."""
         result = await rh_call(self.rh_tools, "get_option_instruments", {
             "chain_symbol": contract.ticker,
             "expiration_dates": contract.expiry.isoformat(),
@@ -217,10 +218,22 @@ class Executor:
                 f"{contract.ticker} {contract.expiry} {contract.strike} {contract.type} "
                 f"(response: {str(result)[:200]})"
             )
-        return instruments[0]["id"]
+        inst = instruments[0]
+        min_ticks = inst.get("min_ticks") if isinstance(inst.get("min_ticks"), dict) else None
+        return inst["id"], min_ticks
+
+    async def _resolve_option_id(self, contract: OptionContract) -> str:
+        """Resolve the RH option instrument UUID from contract fields."""
+        option_id, _ = await self._resolve_instrument(contract)
+        return option_id
 
     def _build_order_params(
-        self, request: OrderRequest, option_id: str, *, for_review: bool
+        self,
+        request: OrderRequest,
+        option_id: str,
+        *,
+        for_review: bool,
+        min_ticks: dict | None = None,
     ) -> dict[str, Any]:
         """Build parameters for review_option_order or place_option_order.
 
@@ -240,7 +253,10 @@ class Executor:
             "time_in_force": "gfd",
         }
         if request.limit_price is not None:
-            params["price"] = f"{float(request.limit_price):.2f}"
+            # Floor onto the instrument's tick grid — RH rejects off-tick
+            # prices ("Price does not satisfy the min tick value")
+            price = round_price_to_tick(request.limit_price, min_ticks)
+            params["price"] = f"{float(price):.2f}"
         if for_review:
             if contract is not None:
                 params["chain_symbol"] = contract.ticker
@@ -249,7 +265,9 @@ class Executor:
             params["ref_id"] = request.ref_id
         return params
 
-    async def _rh_approval(self, request: OrderRequest, option_id: str) -> OrderResult:
+    async def _rh_approval(
+        self, request: OrderRequest, option_id: str, min_ticks: dict | None = None
+    ) -> OrderResult:
         """
         Review the order with RH, interrupt for explicit human approval, then place.
 
@@ -257,7 +275,8 @@ class Executor:
         The graph must be resumed with the human's response ('approve' to proceed,
         anything else to reject). Requires a LangGraph checkpointer to be configured.
         """
-        review_params = self._build_order_params(request, option_id, for_review=True)
+        review_params = self._build_order_params(request, option_id, for_review=True,
+                                                 min_ticks=min_ticks)
 
         review_result = await rh_call(self.rh_tools, "review_option_order", review_params)
         review_summary = _summarize_review(review_result)
@@ -285,7 +304,8 @@ class Executor:
                 timestamp=datetime.now(timezone.utc),
             )
 
-        place_params = self._build_order_params(request, option_id, for_review=False)
+        place_params = self._build_order_params(request, option_id, for_review=False,
+                                                min_ticks=min_ticks)
         place_result = await rh_call(self.rh_tools, "place_option_order", place_params)
         return self._place_outcome(request, place_result, review_summary)
 
@@ -318,12 +338,15 @@ class Executor:
             timestamp=datetime.now(timezone.utc),
         )
 
-    async def _autonomous(self, request: OrderRequest, option_id: str) -> OrderResult:
+    async def _autonomous(
+        self, request: OrderRequest, option_id: str, min_ticks: dict | None = None
+    ) -> OrderResult:
         """
         Review the order with RH and place immediately if no fatal alerts are found.
         No human confirmation step — runs fully within the pipeline.
         """
-        review_params = self._build_order_params(request, option_id, for_review=True)
+        review_params = self._build_order_params(request, option_id, for_review=True,
+                                                 min_ticks=min_ticks)
 
         review_result = await rh_call(self.rh_tools, "review_option_order", review_params)
         review_summary = _summarize_review(review_result)
@@ -339,6 +362,7 @@ class Executor:
                 timestamp=datetime.now(timezone.utc),
             )
 
-        place_params = self._build_order_params(request, option_id, for_review=False)
+        place_params = self._build_order_params(request, option_id, for_review=False,
+                                                min_ticks=min_ticks)
         place_result = await rh_call(self.rh_tools, "place_option_order", place_params)
         return self._place_outcome(request, place_result, review_summary)

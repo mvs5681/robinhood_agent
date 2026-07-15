@@ -296,6 +296,29 @@ class TestResolveOptionId:
         result = await executor._resolve_option_id(_make_contract())
         assert result == "nested"
 
+    async def test_off_tick_price_floored_to_instrument_grid(self):
+        # TQQQ regression: "Price does not satisfy the min tick value" —
+        # non-penny options need the limit floored onto their tick grid
+        rh = _rh_tools(instruments_response={"results": [{
+            "id": FAKE_OPTION_ID,
+            "min_ticks": {"above_tick": "0.10", "below_tick": "0.05",
+                          "cutoff_price": "3.00"},
+        }]})
+        executor = Executor(
+            mode=ExecutionMode.AUTONOMOUS,
+            account_number=ACCOUNT,
+            rh_tools=rh,
+        )
+        candidate = _make_candidate()
+        candidate = candidate.model_copy(update={
+            "selected_contract": candidate.selected_contract.model_copy(
+                update={"bid": Decimal("4.12"), "ask": Decimal("4.22")}  # mid 4.17
+            )
+        })
+        await executor.execute(candidate)
+        place_params = rh["place_option_order"].ainvoke.call_args[0][0]
+        assert place_params["price"] == "4.10"
+
     async def test_raises_when_items_lack_id(self):
         rh = _rh_tools(instruments_response=[{"not_id": "x"}])
         executor = Executor(

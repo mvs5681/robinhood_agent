@@ -23,6 +23,7 @@ from trader.exits.monitor import ExitMonitor
 from trader.exits.schemas import ExitReason, ExitSignal, Position
 from trader.executor.schemas import ExecutionMode
 from trader.rh.mcp_config import rh_call
+from trader.rh.ticks import round_price_to_tick
 
 from .market_hours import is_market_hours
 
@@ -168,7 +169,10 @@ class ExitLoop:
         else:
             try:
                 instrument_id = pos.option_instrument_id or await self._resolve_instrument_id(pos)
-                price = self._exit_limit_price(signal)
+                price = round_price_to_tick(
+                    self._exit_limit_price(signal),
+                    await self._instrument_min_ticks(instrument_id),
+                )
                 params = {
                     "account_number": self._account_number,
                     "quantity": str(pos.quantity),
@@ -218,6 +222,18 @@ class ExitLoop:
 
         if self._notifier:
             await self._notifier.notify_exit(signal, order_id)
+
+    async def _instrument_min_ticks(self, instrument_id: str) -> dict | None:
+        """Fetch the instrument's tick-grid rule; None falls back to pennies."""
+        try:
+            result = await rh_call(self._rh_tools, "get_option_instruments",
+                                   {"ids": instrument_id})
+            items = _extract_items(result)
+            if items and isinstance(items[0], dict) and isinstance(items[0].get("min_ticks"), dict):
+                return items[0]["min_ticks"]
+        except Exception as exc:
+            logger.warning("min_ticks lookup failed for %s: %s", instrument_id, exc)
+        return None
 
     def _exit_limit_price(self, signal: ExitSignal) -> Decimal:
         price = signal.current_premium

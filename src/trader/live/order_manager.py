@@ -36,6 +36,7 @@ from uuid import uuid4
 
 from trader.exits.schemas import Position
 from trader.rh.mcp_config import rh_call
+from trader.rh.ticks import round_price_to_tick
 from trader.uw.schemas import OptionContract
 
 if TYPE_CHECKING:
@@ -73,6 +74,7 @@ class WorkingOrder:
     attempts: int = 0                    # replacements so far
     cancelling: bool = False             # cancel requested, awaiting confirmation
     giving_up: bool = False              # cancel is final — do not re-place
+    min_ticks: dict | None = None        # instrument tick grid, fetched lazily
 
     @property
     def ticker(self) -> str:
@@ -406,7 +408,21 @@ class OrderLifecycleManager:
         else:
             price = ask
         price = min(price, self._price_cap)
-        return price.quantize(Decimal("0.01"))
+        if wo.min_ticks is None:
+            wo.min_ticks = await self._fetch_min_ticks(wo)
+        return round_price_to_tick(price, wo.min_ticks)
+
+    async def _fetch_min_ticks(self, wo: WorkingOrder) -> dict | None:
+        try:
+            result = await rh_call(self._rh_tools, "get_option_instruments",
+                                   {"ids": wo.option_id})
+            inner = result.get("data", result) if isinstance(result, dict) else {}
+            items = inner.get("instruments", inner.get("results", [])) if isinstance(inner, dict) else []
+            if items and isinstance(items[0], dict) and isinstance(items[0].get("min_ticks"), dict):
+                return items[0]["min_ticks"]
+        except Exception as exc:
+            logger.warning("min_ticks lookup failed for %s: %s", wo.ticker, exc)
+        return None
 
     # ------------------------------------------------------------------
     # Fill promotion

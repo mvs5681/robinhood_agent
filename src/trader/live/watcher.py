@@ -293,5 +293,22 @@ class FlowWatcher:
                         "AUTONOMOUS %s placed=%s order_id=%s",
                         ticker, result.placed, result.order_id,
                     )
+                    if self._notifier:
+                        sc = candidate.selected_contract
+                        detail = (f"{sc.type} ${sc.strike} exp {sc.expiry}"
+                                  if sc else "")
+                        if result.placed:
+                            await self._notifier.notify_text(
+                                f"<b>Autonomous order placed</b>\n"
+                                f"{ticker} {detail} x{result.request.quantity} "
+                                f"@ <code>{result.request.limit_price}</code>\n"
+                                f"Order <code>{result.order_id}</code> — "
+                                f"fill/reprice managed automatically."
+                            )
+                        else:
+                            await self._notifier.notify_text(
+                                f"<b>Autonomous order rejected</b>\n"
+                                f"{ticker} {detail} — {result.rejection_reason}"
+                            )
                 except Exception as exc:
                     logger.error("%s autonomous execute failed: %s", ticker, exc)

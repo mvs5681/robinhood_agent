@@ -1,0 +1,13 @@
+# Runtime state — mounted as a volume, never part of the image
+logs/
+
+# Secrets and local env
+.env
+
+# Dev clutter irrelevant to the image
+.git/
+.venv/
+tests/
+*.log
+__pycache__/
+*.pyc

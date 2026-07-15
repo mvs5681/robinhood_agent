@@ -75,6 +75,8 @@ header { background:var(--surface); border-bottom:1px solid var(--border);
 header h1 { font-size:16px; font-weight:700; }
 #badge-mode { font-size:11px; padding:2px 8px; border-radius:20px;
               background:rgba(88,166,255,.15); color:var(--blue); border:1px solid var(--blue); }
+#badge-mode.mode-autonomous { background:rgba(248,81,73,.15); color:var(--red); border-color:var(--red); }
+#badge-mode.mode-propose_only { background:rgba(139,148,158,.15); color:var(--muted); border-color:var(--muted); }
 #refresh-timer { margin-left:auto; font-size:11px; color:var(--muted); }
 
 /* ── Tabs ── */
@@ -825,6 +827,7 @@ function tick() {
 }
 function refreshAll() {
   loadOverview();
+  loadStatus();
   const activeTab = document.querySelector('nav.tabs button.active')?.dataset.tab;
   if (activeTab === 'market')     loadMarket();
   if (activeTab === 'decisions')  loadDecisions();
@@ -907,8 +910,22 @@ async function saveSettings() {
   }
 }
 
+// ── Mode badge ────────────────────────────────────────────────────────
+async function loadStatus() {
+  try {
+    const s = await fetch('/api/status').then(r => r.json());
+    const badge = document.getElementById('badge-mode');
+    badge.textContent = s.mode;
+    badge.className = 'mode-' + s.mode;
+    let title = `open positions: ${s.open_positions} · working orders: ${s.working_orders}`;
+    if (s.mode === 'autonomous') title = 'Executing without approval — ' + title;
+    badge.title = title;
+  } catch (e) { /* leave placeholder */ }
+}
+
 // ── Boot ──────────────────────────────────────────────────────────────
 initTabs();
+loadStatus();
 initGlossary();
 loadOverview();
 loadMarket();       // always pre-load market on boot
@@ -1171,6 +1188,15 @@ def create_app(
         out.sort(key=lambda t: t["confidence"], reverse=True)
         return _json_response(out)
 
+    # ── Status API ──────────────────────────────────────────────────────
+    async def status(req: web.Request) -> web.Response:
+        mode = getattr(executor, "mode", None)
+        return _json_response({
+            "mode": mode.value if mode is not None else "unknown",
+            "open_positions": position_store.count if position_store is not None else 0,
+            "working_orders": order_manager.working_count if order_manager is not None else 0,
+        })
+
     # ── Config API ──────────────────────────────────────────────────────
     async def get_config(req: web.Request) -> web.Response:
         if config is None:
@@ -1215,6 +1241,7 @@ def create_app(
     app.router.add_get("/api/decisions", list_decisions)
     app.router.add_get("/api/decisions/{run_id}", get_decision)
     app.router.add_get("/api/market", market_snapshot)
+    app.router.add_get("/api/status", status)
     app.router.add_get("/api/config", get_config)
     app.router.add_post("/api/config", update_config)
     app.router.add_get("/api/telemetry/summary", telemetry_summary)

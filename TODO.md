@@ -21,6 +21,12 @@ avg P&L, and drawdown per regime/setup type. The harness works
 
 ## Later / nice to have
 
+- [ ] Reconcile working (unfilled) orders at startup — reconciliation only
+      pulls open positions, so an order placed pre-restart that fills
+      post-restart is unmonitored until the *next* restart. Poll
+      `get_option_orders` (state=confirmed/queued, placed_agent=agentic) at
+      startup and either track them for fill-to-position promotion or cancel
+      them.
 - [ ] Expose the contract selector window (DTE min/max, delta min/max) in the
       dashboard Settings tab
 - [ ] Extend `NYSE_HOLIDAYS` in `market_hours.py` before 2028

@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# GEX Backtest Workflow — fetch historical data then run backtest
+# GEX Backtest Workflow — two runs: H1 2025 (last year) + H1 2026 (recent)
 #
 # Prerequisites:
-#   1. pip install -e . (or pip install -r requirements, from the repo root)
-#   2. Set POLYGON_API_KEY in .env (free tier is fine — uses --free-tier flag)
+#   1. pip install -e .  (from repo root)
+#   2. Set POLYGON_API_KEY in .env
 #
-# Edit the variables below, then:
+# Edit variables below, then:
 #   chmod +x scripts/backtest_workflow.sh
 #   ./scripts/backtest_workflow.sh
 
@@ -14,17 +14,25 @@ set -euo pipefail
 # ── Configuration ────────────────────────────────────────────────────────────
 
 TICKERS="SPY"            # space-separated, e.g. "SPY QQQ AAPL"
-START_DATE="2026-01-20"  # first trading day to backtest (~6 months ago)
-END_DATE="2026-07-17"    # last trading day (most recent close)
-OUT_DIR="data/history"   # where fixture files are written
 CAPITAL="2000"           # starting portfolio capital in USD
+FIXTURES_DIR="data/history"
+RESULTS_DIR="results"
 
-# ── Derived ──────────────────────────────────────────────────────────────────
+# Run 1 — H1 2025 (last year baseline)
+RUN1_LABEL="2025_h1"
+RUN1_START="2025-01-02"
+RUN1_END="2025-06-30"
+
+# Run 2 — H1 2026 (recent 6 months)
+RUN2_LABEL="2026_h1"
+RUN2_START="2026-01-20"
+RUN2_END="2026-07-17"
+
+# ── Setup ─────────────────────────────────────────────────────────────────────
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# Load .env if present
 if [[ -f "$REPO_ROOT/.env" ]]; then
     set -a
     # shellcheck disable=SC1091
@@ -40,47 +48,126 @@ fi
 
 cd "$REPO_ROOT"
 
-echo "========================================"
-echo " GEX Backtest Workflow"
-echo "========================================"
-echo "  Tickers   : $TICKERS"
-echo "  Date range: $START_DATE → $END_DATE"
-echo "  Capital   : \$$CAPITAL"
-echo "  Fixtures  : $OUT_DIR"
-echo "  Plan      : Polygon Starter (real per-contract OHLCV pricing)"
-echo "========================================"
+echo "╔══════════════════════════════════════════╗"
+echo "║       GEX Backtest — Dual Run            ║"
+echo "╚══════════════════════════════════════════╝"
+echo "  Tickers : $TICKERS"
+echo "  Capital : \$$CAPITAL per run"
+echo "  Run 1   : $RUN1_START → $RUN1_END  ($RUN1_LABEL)"
+echo "  Run 2   : $RUN2_START → $RUN2_END  ($RUN2_LABEL)"
+echo "  Fixtures: $FIXTURES_DIR"
+echo "  Results : $RESULTS_DIR/{run}/"
 echo ""
 
-# ── Step 1: Fetch historical fixtures ────────────────────────────────────────
+# ── Helper ───────────────────────────────────────────────────────────────────
 
-echo "Step 1/2 — Fetching historical data from Polygon..."
-echo "  (resumable: already-fetched dates are skipped automatically)"
+run_period() {
+    local label="$1"
+    local start="$2"
+    local end="$3"
+
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo " Step 1/$label — Fetching $start → $end"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "  (resumable — already-fetched dates skipped)"
+    echo ""
+
+    # shellcheck disable=SC2086
+    python scripts/fetch_polygon_history.py \
+        --start    "$start" \
+        --end      "$end" \
+        --tickers  $TICKERS \
+        --out      "$FIXTURES_DIR"
+
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo " Step 2/$label — Running backtest"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+
+    # shellcheck disable=SC2086
+    python scripts/run_backtest.py \
+        --fixtures      "$FIXTURES_DIR" \
+        --start         "$start" \
+        --end           "$end" \
+        --tickers       $TICKERS \
+        --capital       "$CAPITAL" \
+        --max-positions 3 \
+        --csv-out       "$RESULTS_DIR/$label"
+
+    echo ""
+    echo "  ✓ $label complete — CSVs in $RESULTS_DIR/$label/"
+    echo ""
+}
+
+# ── Run both periods ──────────────────────────────────────────────────────────
+
+run_period "$RUN1_LABEL" "$RUN1_START" "$RUN1_END"
+run_period "$RUN2_LABEL" "$RUN2_START" "$RUN2_END"
+
+# ── Summary ───────────────────────────────────────────────────────────────────
+
+echo "╔══════════════════════════════════════════╗"
+echo "║  Both runs complete                      ║"
+echo "╚══════════════════════════════════════════╝"
+echo ""
+echo "  CSV output:"
+echo "    $RESULTS_DIR/$RUN1_LABEL/trades.csv   — per-trade records (H1 2025)"
+echo "    $RESULTS_DIR/$RUN1_LABEL/equity.csv   — daily portfolio value (H1 2025)"
+echo "    $RESULTS_DIR/$RUN1_LABEL/summary.csv  — key metrics (H1 2025)"
+echo ""
+echo "    $RESULTS_DIR/$RUN2_LABEL/trades.csv   — per-trade records (H1 2026)"
+echo "    $RESULTS_DIR/$RUN2_LABEL/equity.csv   — daily portfolio value (H1 2026)"
+echo "    $RESULTS_DIR/$RUN2_LABEL/summary.csv  — key metrics (H1 2026)"
 echo ""
 
-# shellcheck disable=SC2086
-python scripts/fetch_polygon_history.py \
-    --start "$START_DATE" \
-    --end   "$END_DATE" \
-    --tickers $TICKERS \
-    --out   "$OUT_DIR"
+# Quick side-by-side summary if python is available
+python3 - <<'PYEOF'
+import csv, sys
+from pathlib import Path
 
-echo ""
-echo "Step 1/2 complete."
-echo ""
+runs = [("H1 2025", "results/2025_h1"), ("H1 2026", "results/2026_h1")]
+print("  ┌─────────────────────────────────────────────────────────────┐")
+print("  │ Side-by-side comparison                                     │")
+print("  ├──────────────────────────┬──────────────────┬──────────────┤")
+print(f"  │ {'Metric':<26}│ {'H1 2025':>16} │ {'H1 2026':>12} │")
+print("  ├──────────────────────────┼──────────────────┼──────────────┤")
 
-# ── Step 2: Run backtest ──────────────────────────────────────────────────────
+metrics_to_show = [
+    ("trade_count",          "Trades"),
+    ("win_rate",             "Win rate"),
+    ("avg_pnl_pct",          "Avg P&L %"),
+    ("initial_capital",      "Capital ($)"),
+    ("final_value",          "Final value ($)"),
+    ("total_pnl_dollars",    "Total P&L ($)"),
+    ("total_return_pct",     "Total return %"),
+    ("max_drawdown_dollars", "Max drawdown ($)"),
+]
 
-echo "Step 2/2 — Running backtest..."
-echo ""
+data = {}
+for label, path in runs:
+    summary = Path(path) / "summary.csv"
+    if not summary.exists():
+        data[label] = {}
+        continue
+    with open(summary) as f:
+        data[label] = {row[0]: row[1] for row in csv.reader(f) if len(row) == 2}
 
-# shellcheck disable=SC2086
-python scripts/run_backtest.py \
-    --fixtures      "$OUT_DIR" \
-    --start         "$START_DATE" \
-    --end           "$END_DATE" \
-    --tickers       $TICKERS \
-    --capital       "$CAPITAL" \
-    --max-positions 3
+for key, display in metrics_to_show:
+    v1 = data.get("H1 2025", {}).get(key, "n/a")
+    v2 = data.get("H1 2026", {}).get(key, "n/a")
+    # Format percentages
+    if key in ("win_rate", "avg_pnl_pct", "total_return_pct"):
+        try: v1 = f"{float(v1):+.1%}"
+        except: pass
+        try: v2 = f"{float(v2):+.1%}"
+        except: pass
+    elif key in ("initial_capital", "final_value", "total_pnl_dollars", "max_drawdown_dollars"):
+        try: v1 = f"${float(v1):,.2f}"
+        except: pass
+        try: v2 = f"${float(v2):,.2f}"
+        except: pass
+    print(f"  │ {display:<26}│ {str(v1):>16} │ {str(v2):>12} │")
 
-echo ""
-echo "Done. Edit TICKERS / START_DATE / END_DATE at the top of this script to re-run."
+print("  └──────────────────────────┴──────────────────┴──────────────┘")
+PYEOF

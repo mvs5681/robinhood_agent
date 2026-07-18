@@ -52,6 +52,26 @@ _FIELDS: dict[str, tuple] = {
         lambda v: len(v) <= 20 and all(_TICKER_RE.match(t) for t in v),
         "must be at most 20 valid ticker symbols",
     ),
+    "selector_dte_min": (
+        int,
+        lambda v: 1 <= v <= 365,
+        "must be between 1 and 365",
+    ),
+    "selector_dte_max": (
+        int,
+        lambda v: 1 <= v <= 365,
+        "must be between 1 and 365",
+    ),
+    "selector_delta_min": (
+        float,
+        lambda v: 0.01 <= v <= 0.99,
+        "must be between 0.01 and 0.99",
+    ),
+    "selector_delta_max": (
+        float,
+        lambda v: 0.01 <= v <= 0.99,
+        "must be between 0.01 and 0.99",
+    ),
 }
 
 
@@ -63,6 +83,11 @@ class LiveConfig:
     stop_loss_pct: float = 0.35
     dte_floor: int = 7
     seed_tickers: list[str] = field(default_factory=list)
+    # Contract selector window — kept in sync with SelectorParams defaults
+    selector_dte_min: int = 21
+    selector_dte_max: int = 30
+    selector_delta_min: float = 0.30
+    selector_delta_max: float = 0.45
     path: Path | None = None
 
     @classmethod
@@ -134,4 +159,8 @@ class LiveConfig:
             "stop_loss_pct": self.stop_loss_pct,
             "dte_floor": self.dte_floor,
             "seed_tickers": self.seed_tickers,
+            "selector_dte_min": self.selector_dte_min,
+            "selector_dte_max": self.selector_dte_max,
+            "selector_delta_min": self.selector_delta_min,
+            "selector_delta_max": self.selector_delta_max,
         }

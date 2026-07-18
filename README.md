@@ -65,7 +65,7 @@ get_flow_alerts (UW MCP, every hour)
          ▼
   ┌─────────────┐
   │  Contract   │  Select optimal strike and expiry:
-  │  Selector   │  target delta 0.30–0.55, DTE 7–45 days,
+  │  Selector   │  target delta 0.30–0.45, DTE 21–30 days,
   └──────┬──────┘  spread < 15%, liquidity filters
          │
          ▼

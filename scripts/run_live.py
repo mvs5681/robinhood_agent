@@ -46,7 +46,7 @@ from trader.live.notifier import TelegramNotifier
 from trader.live.order_manager import OrderLifecycleManager
 from trader.live.position_store import PositionStore
 from trader.live.proposals import ProposalStore
-from trader.live.reconciler import reconcile_positions
+from trader.live.reconciler import reconcile_open_orders, reconcile_positions
 from trader.live.scanner import GEXScanner
 from trader.live.telemetry_reader import TelemetryReader
 from trader.live.watcher import FlowWatcher
@@ -179,8 +179,23 @@ async def main() -> None:
     cache = GEXCache()
     proposal_store = ProposalStore()
     position_store = PositionStore()
+
+    # Load sector map from file if configured — activates the sector-concentration gate.
+    sector_map: dict[str, str] | None = None
+    sector_map_file = os.environ.get("SECTOR_MAP_FILE", "")
+    if sector_map_file:
+        sector_map_path = Path(sector_map_file)
+        if sector_map_path.exists():
+            try:
+                sector_map = json.loads(sector_map_path.read_text())
+                logger.info("Loaded sector map from %s (%d tickers)", sector_map_path, len(sector_map))
+            except Exception as exc:
+                logger.warning("Could not load sector map from %s: %s — sector gate inactive", sector_map_path, exc)
+        else:
+            logger.warning("SECTOR_MAP_FILE=%s not found — sector gate inactive", sector_map_file)
+
     # Position cap reads live from PositionStore so exits free up slots
-    risk_engine = RiskEngine(open_positions_fn=lambda: position_store.count)
+    risk_engine = RiskEngine(open_positions_fn=lambda: position_store.count, sector_map=sector_map)
 
     # Order lifecycle: fill promotion, reprice-toward-ask, give-up cancel
     order_manager: OrderLifecycleManager | None = None
@@ -263,6 +278,11 @@ async def main() -> None:
     # Reconcile any open positions from before this container started
     if mode != ExecutionMode.PROPOSE_ONLY and account_number and rh_tools:
         await reconcile_positions(rh_tools, position_store, account_number)
+
+    # Reconcile pending agentic orders (queued/confirmed but not yet filled)
+    # so the exit loop monitors them once they fill.
+    if mode != ExecutionMode.PROPOSE_ONLY and rh_tools:
+        await reconcile_open_orders(rh_tools, position_store)
 
     # Adopt agentic orders still working from before the restart, so a fill
     # after the restart still becomes a monitored position

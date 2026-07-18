@@ -255,8 +255,8 @@ const GLOSSARY = {
   "Flow Pressure": "Fraction of flow alerts aligned with the trade direction + net-premium momentum over 4 hours. Measures persistence of directional conviction.",
   "IV Cost": "Implied volatility cost score. Low IV percentile = cheap options = high score. Entering when IV is elevated means overpaying for gamma — lowers conviction.",
   "Technicals": "RSI + MACD timing alignment score. Measures how well price momentum and trend confirm the GEX directional setup.",
-  "Delta": "Option price change per $1 move in the underlying. Target range: 0.30–0.55 (near-the-money). Deep ITM has high delta but poor leverage; far OTM has low probability.",
-  "DTE": "Days To Expiration. Target: 7–45 days. Too short increases theta decay risk; too long ties up capital and reduces leverage.",
+  "Delta": "Option price change per $1 move in the underlying. Target range: 0.30–0.45 (near-the-money). Deep ITM has high delta but poor leverage; far OTM has low probability.",
+  "DTE": "Days To Expiration. Target: 21–30 days. Too short increases theta decay risk; too long ties up capital and reduces leverage.",
   "Spread %": "Bid-ask spread as a % of mid price. High spread = poor liquidity = expensive to enter/exit. Filtered above 15%.",
   "Alert Premium": "Total dollar value of the whale option print (size × premium × 100). Minimum $100K to trigger the flow gate.",
   "Sweep": "Order routed across multiple exchanges simultaneously to fill immediately — signals urgency and strong directional conviction.",
@@ -850,6 +850,14 @@ const SETTINGS_FIELDS = [
    hint:'Close if option premium drops this fraction from entry (0.01–0.95, e.g. 0.35 = 35%)'},
   {key:'dte_floor', label:'DTE Floor (days)', type:'number',
    hint:'Close positions when days-to-expiry reaches this value (0–30)'},
+  {key:'selector_dte_min', label:'Contract Selector DTE Min (days)', type:'number',
+   hint:'Minimum days-to-expiry when selecting contracts (default 21)'},
+  {key:'selector_dte_max', label:'Contract Selector DTE Max (days)', type:'number',
+   hint:'Maximum days-to-expiry when selecting contracts (default 30)'},
+  {key:'selector_delta_min', label:'Contract Selector Delta Min', type:'number', step:'0.01',
+   hint:'Minimum absolute delta for selected contracts (default 0.30)'},
+  {key:'selector_delta_max', label:'Contract Selector Delta Max', type:'number', step:'0.01',
+   hint:'Maximum absolute delta for selected contracts (default 0.45)'},
 ];
 
 async function loadSettings() {

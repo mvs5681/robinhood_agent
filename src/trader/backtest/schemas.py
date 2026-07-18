@@ -22,7 +22,13 @@ class BacktestPosition:
     entry_premium: Decimal
     target_level: Decimal
     opened_on: date
+    contracts: int = 1          # number of option contracts entered
     sector: str | None = None
+
+    @property
+    def entry_cost(self) -> Decimal:
+        """Total cash outlay: entry_premium × contracts × 100 shares/contract."""
+        return self.entry_premium * self.contracts * 100
 
     def as_exit_position(self):
         """Return exits/schemas.Position for use with ExitMonitor.evaluate()."""
@@ -39,7 +45,8 @@ class BacktestPosition:
         )
 
     @classmethod
-    def from_candidate(cls, candidate: "CandidateSignal", entry_date: date) -> BacktestPosition:
+    def from_candidate(cls, candidate: "CandidateSignal", entry_date: date,
+                       contracts: int = 1) -> BacktestPosition:
         contract = candidate.selected_contract
         assert contract is not None, "selected_contract must not be None at entry"
         target = candidate.gex_setup.target_level
@@ -52,6 +59,7 @@ class BacktestPosition:
             entry_premium=contract.mid,
             target_level=target,
             opened_on=entry_date,
+            contracts=contracts,
         )
 
 
@@ -65,12 +73,14 @@ class BacktestTradeRecord:
     exit_date: date | None = None
     exit_signal: "ExitSignal | None" = None
     pnl_pct: float | None = None
+    pnl_dollars: float | None = None   # actual dollar gain/loss for this trade
     status: Literal["open", "closed", "expired"] = "open"
 
     def close(self, signal: "ExitSignal", exit_date: date) -> None:
         self.exit_date = exit_date
         self.exit_signal = signal
         self.pnl_pct = signal.pnl_pct
+        self.pnl_dollars = signal.pnl_pct * float(self.position.entry_cost)
         self.status = "closed"
 
     def expire(self, as_of_date: date) -> None:

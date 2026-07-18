@@ -171,14 +171,21 @@ tr:last-child td { border-bottom:none; }
 .kv-row .v { color:var(--text); font-weight:500; }
 .prop-actions { display:flex; gap:10px; }
 .btn { padding:7px 20px; border-radius:5px; border:none; cursor:pointer; font-size:13px;
-       font-weight:600; transition:opacity .15s; }
+       font-weight:600; transition:opacity .15s; min-height:44px;
+       display:inline-flex; align-items:center; justify-content:center; }
 .btn:hover { opacity:.8; }
 .btn:disabled { opacity:.35; cursor:not-allowed; }
 .btn-approve { background:var(--green); color:#000; flex:1; }
 .btn-reject  { background:rgba(248,81,73,.2); color:var(--red); border:1px solid var(--red); flex:1; }
 
 /* ── Drawer ── */
-#drawer { position:fixed; top:0; right:0; width:var(--drawer-w); height:100vh;
+/* ── Drawer backdrop (mobile tap-outside to close) ── */
+#drawer-backdrop { position:fixed; inset:0; background:rgba(0,0,0,.5);
+                   z-index:199; display:none; }
+#drawer-backdrop.open { display:block; }
+
+#drawer { position:fixed; top:0; right:0; width:var(--drawer-w);
+          height:100vh; height:100dvh;
           background:var(--surface); border-left:1px solid var(--border);
           transform:translateX(100%); transition:transform .25s ease;
           overflow-y:auto; z-index:200; display:flex; flex-direction:column; }
@@ -188,7 +195,8 @@ tr:last-child td { border-bottom:none; }
                  background:var(--surface); z-index:1; }
 #drawer-title { font-size:15px; font-weight:700; flex:1; }
 #drawer-close { background:none; border:none; color:var(--muted); cursor:pointer;
-                font-size:18px; padding:4px 8px; }
+                font-size:18px; padding:8px 12px; min-height:44px;
+                display:inline-flex; align-items:center; justify-content:center; }
 #drawer-close:hover { color:var(--text); }
 #drawer-body { padding:16px; flex:1; }
 .d-section { margin-bottom:16px; }
@@ -221,9 +229,10 @@ tr:last-child td { border-bottom:none; }
 
 /* ── Glossary ── */
 #glossary-btn { position:fixed; bottom:20px; right:20px; background:var(--surface2);
-                border:1px solid var(--border); border-radius:20px; padding:6px 14px;
+                border:1px solid var(--border); border-radius:20px; padding:10px 16px;
                 color:var(--muted); cursor:pointer; font-size:12px; z-index:150;
-                transition:color .15s; }
+                transition:color .15s; min-height:44px;
+                display:inline-flex; align-items:center; }
 #glossary-btn:hover { color:var(--text); }
 #glossary-panel { position:fixed; bottom:60px; right:20px; width:340px; max-height:420px;
                   overflow-y:auto; background:var(--surface); border:1px solid var(--border);
@@ -272,6 +281,7 @@ tr:last-child td { border-bottom:none; }
   nav.tabs button { flex-shrink:0; padding:10px 12px; font-size:12px; }
   header { padding:8px 12px; }
   header h1 { font-size:14px; }
+  #header-right { display:none; }
   #market-grid { grid-template-columns:1fr; }
   .prop-grid { grid-template-columns:1fr; }
   .proposal-card { min-width:0; }
@@ -350,16 +360,22 @@ function initTabs() {
 
 // ── Drawer ────────────────────────────────────────────────────────────
 const drawer = document.getElementById('drawer');
+const drawerBackdrop = document.getElementById('drawer-backdrop');
 function openDrawer(runId) {
   drawer.classList.add('open');
+  drawerBackdrop.classList.add('open');
   if (runId.startsWith('market:')) { openMarketDrawer(runId.slice(7)); return; }
   fetch('/api/decisions/' + encodeURIComponent(runId))
     .then(r => r.json())
     .then(d => renderDrawer(d))
     .catch(() => renderDrawerError('Failed to load decision detail'));
 }
-function closeDrawer() { drawer.classList.remove('open'); }
+function closeDrawer() {
+  drawer.classList.remove('open');
+  drawerBackdrop.classList.remove('open');
+}
 document.getElementById('drawer-close').addEventListener('click', closeDrawer);
+drawerBackdrop.addEventListener('click', closeDrawer);
 
 function renderDrawerError(msg) {
   document.getElementById('drawer-title').textContent = 'Detail';
@@ -1184,7 +1200,7 @@ _DASHBOARD_BODY = """
 <header>
   <h1>GEX Trading Agent</h1>
   <span id="badge-mode">rh_approval</span>
-  <div style="display:flex;gap:16px;margin-left:auto;align-items:center">
+  <div id="header-right" style="display:flex;gap:16px;margin-left:auto;align-items:center">
     <div style="display:flex;gap:10px;font-size:12px">
       <span style="color:var(--muted)">Last hr:</span>
       <span style="color:var(--green)"><b id="ov-ok">—</b> ok</span>
@@ -1236,6 +1252,8 @@ _DASHBOARD_BODY = """
   <div id="settings-wrap"><div class="empty-msg">Loading…</div></div>
 </div>
 
+<!-- Backdrop — closes drawer when tapped (visible on mobile) -->
+<div id="drawer-backdrop"></div>
 <!-- Detail drawer (side panel on desktop, bottom sheet on mobile) -->
 <div id="drawer">
   <div id="drawer-drag"><div id="drawer-drag-handle"></div></div>

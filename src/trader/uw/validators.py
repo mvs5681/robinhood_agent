@@ -62,7 +62,8 @@ def _unwrap(raw: Any) -> list[dict]:
                 merged.extend(text_val)
         if any_parsed:
             return merged
-        # All blocks were unparseable — fall through to plain-format handling below
+        # All blocks returned error text (e.g. "unsupported parameter") — treat as empty
+        return []
 
     if isinstance(raw, dict):
         if "data" in raw:

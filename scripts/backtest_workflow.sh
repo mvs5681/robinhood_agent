@@ -48,6 +48,12 @@ fi
 
 cd "$REPO_ROOT"
 
+PYTHON="$REPO_ROOT/.venv/bin/python3.12"
+if [[ ! -x "$PYTHON" ]]; then
+    echo "ERROR: $PYTHON not found. Run: python3.12 -m venv .venv && .venv/bin/pip install -e ."
+    exit 1
+fi
+
 echo "╔══════════════════════════════════════════╗"
 echo "║       GEX Backtest — Dual Run            ║"
 echo "╚══════════════════════════════════════════╝"
@@ -73,7 +79,7 @@ run_period() {
     echo ""
 
     # shellcheck disable=SC2086
-    python scripts/fetch_polygon_history.py \
+    "$PYTHON" scripts/fetch_polygon_history.py \
         --start    "$start" \
         --end      "$end" \
         --tickers  $TICKERS \
@@ -86,7 +92,7 @@ run_period() {
     echo ""
 
     # shellcheck disable=SC2086
-    python scripts/run_backtest.py \
+    "$PYTHON" scripts/run_backtest.py \
         --fixtures      "$FIXTURES_DIR" \
         --start         "$start" \
         --end           "$end" \
@@ -122,7 +128,7 @@ echo "    $RESULTS_DIR/$RUN2_LABEL/summary.csv  — key metrics (H1 2026)"
 echo ""
 
 # Quick side-by-side summary if python is available
-python3 - <<'PYEOF'
+"$PYTHON" - <<'PYEOF'
 import csv, sys
 from pathlib import Path
 

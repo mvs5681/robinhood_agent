@@ -47,7 +47,7 @@ echo "  Tickers   : $TICKERS"
 echo "  Date range: $START_DATE → $END_DATE"
 echo "  Capital   : \$$CAPITAL"
 echo "  Fixtures  : $OUT_DIR"
-echo "  Plan      : Polygon free tier (5 calls/min, BS pricing)"
+echo "  Plan      : Polygon Starter (real per-contract OHLCV pricing)"
 echo "========================================"
 echo ""
 
@@ -62,8 +62,7 @@ python scripts/fetch_polygon_history.py \
     --start "$START_DATE" \
     --end   "$END_DATE" \
     --tickers $TICKERS \
-    --out   "$OUT_DIR" \
-    --free-tier
+    --out   "$OUT_DIR"
 
 echo ""
 echo "Step 1/2 complete."

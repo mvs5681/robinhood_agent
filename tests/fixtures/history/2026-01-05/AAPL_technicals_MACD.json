@@ -1,0 +1,7 @@
+{
+  "data": [
+    {"timestamp": "2025-12-31", "MACD": "1.45", "MACD_Signal": "0.95", "MACD_Hist": "0.50"},
+    {"timestamp": "2026-01-02", "MACD": "1.65", "MACD_Signal": "1.10", "MACD_Hist": "0.55"},
+    {"timestamp": "2026-01-05", "MACD": "1.90", "MACD_Signal": "1.30", "MACD_Hist": "0.60"}
+  ]
+}

@@ -1,0 +1,6 @@
+{
+  "data": [
+    {"days": 7,  "volatility": "0.278", "percentile": "52.6", "implied_move_perc": "0.026", "date": "2026-01-02"},
+    {"days": 30, "volatility": "0.285", "percentile": "35.0", "implied_move_perc": "0.055", "date": "2026-01-02"}
+  ]
+}

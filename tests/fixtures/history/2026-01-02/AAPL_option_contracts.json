@@ -1,0 +1,14 @@
+{
+  "data": [
+    {
+      "ticker": "AAPL", "expiry": "2026-01-30", "strike": "200.0", "type": "call",
+      "bid": "2.90", "ask": "3.10", "open_interest": 9000, "volume": 4500,
+      "implied_volatility": "0.285", "delta": "0.38", "gamma": "0.042", "theta": "-0.065", "vega": "0.18"
+    },
+    {
+      "ticker": "AAPL", "expiry": "2026-01-30", "strike": "197.5", "type": "call",
+      "bid": "3.60", "ask": "3.80", "open_interest": 7500, "volume": 3200,
+      "implied_volatility": "0.290", "delta": "0.42", "gamma": "0.045", "theta": "-0.070", "vega": "0.19"
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "data": [
+    {"days": 1,  "volatility": "1.739", "percentile": "100.0", "implied_move_perc": "0.003", "date": "2026-06-30"},
+    {"days": 5,  "volatility": "0.696", "percentile": "94.7",  "implied_move_perc": "0.020", "date": "2026-06-30"},
+    {"days": 7,  "volatility": "0.278", "percentile": "52.6",  "implied_move_perc": "0.026", "date": "2026-06-30"},
+    {"days": 14, "volatility": "0.311", "percentile": "68.4",  "implied_move_perc": "0.041", "date": "2026-06-30"},
+    {"days": 30, "volatility": "0.299", "percentile": "35.2",  "implied_move_perc": "0.058", "date": "2026-06-30"},
+    {"days": 60, "volatility": "0.265", "percentile": "28.1",  "implied_move_perc": "0.082", "date": "2026-06-30"}
+  ]
+}

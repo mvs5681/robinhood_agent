@@ -1,0 +1,10 @@
+{
+  "data": [
+    {"timestamp": "2026-06-24", "MACD": "-0.42", "MACD_Signal": "-0.18", "MACD_Hist": "-0.24"},
+    {"timestamp": "2026-06-25", "MACD": "-0.31", "MACD_Signal": "-0.22", "MACD_Hist": "-0.09"},
+    {"timestamp": "2026-06-26", "MACD": "-0.10", "MACD_Signal": "-0.19", "MACD_Hist": "0.09"},
+    {"timestamp": "2026-06-27", "MACD": "0.15",  "MACD_Signal": "-0.10", "MACD_Hist": "0.25"},
+    {"timestamp": "2026-06-28", "MACD": "0.38",  "MACD_Signal": "0.05",  "MACD_Hist": "0.33"},
+    {"timestamp": "2026-06-30", "MACD": "0.52",  "MACD_Signal": "0.21",  "MACD_Hist": "0.31"}
+  ]
+}

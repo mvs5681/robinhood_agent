@@ -103,13 +103,19 @@ def parse_flow_alerts(raw: Any) -> list[FlowAlert]:
 def parse_spot_gex_by_strike(raw: Any) -> list[SpotGEXByStrike]:
     items = _unwrap(raw)
     result = []
-    for i, item in enumerate(items):
+    skipped = 0
+    for item in items:
+        # Try multiple field name variants used across different API versions
+        price = (item.get("price") or item.get("strike") or
+                 item.get("strike_price") or item.get("expiry_strike"))
+        if price is None:
+            skipped += 1
+            continue
         try:
-            # get_greek_exposure_by_strike uses call_gex/put_gex/strike field names
             normalised = {
-                "price":         item.get("price") or item.get("strike"),
-                "call_gamma_oi": item.get("call_gamma_oi") or item.get("call_gex") or 0,
-                "put_gamma_oi":  item.get("put_gamma_oi") or item.get("put_gex") or 0,
+                "price":          price,
+                "call_gamma_oi":  item.get("call_gamma_oi") or item.get("call_gex") or 0,
+                "put_gamma_oi":   item.get("put_gamma_oi") or item.get("put_gex") or 0,
                 "call_gamma_vol": item.get("call_gamma_vol"),
                 "put_gamma_vol":  item.get("put_gamma_vol"),
                 "call_delta_oi":  item.get("call_delta_oi") or item.get("call_delta"),
@@ -117,8 +123,11 @@ def parse_spot_gex_by_strike(raw: Any) -> list[SpotGEXByStrike]:
                 "time":           item.get("time") or item.get("date"),
             }
             result.append(SpotGEXByStrike.model_validate(normalised))
-        except ValidationError as e:
-            raise UWValidationError(f"SpotGEXByStrike[{i}] validation failed: {e}") from e
+        except ValidationError:
+            skipped += 1
+    if skipped:
+        import logging
+        logging.getLogger(__name__).debug("parse_spot_gex_by_strike: skipped %d unparseable rows", skipped)
     return result
 
 

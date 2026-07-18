@@ -37,7 +37,7 @@ jobs:
   # ─────────────────────────────────────────────
   # CD — runs only on push to main (post-merge)
   # Builds, tags, and pushes to GitHub Container Registry
-  # Then SSHes into the server to pull and restart
+  # Deploy manually: docker pull ghcr.io/<repo>:latest && docker compose up -d --no-build
   # ─────────────────────────────────────────────
   release:
     name: Release
@@ -81,23 +81,12 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # ── Deploy to your Linux server via SSH ──────────────────────────
-      # Required repository secrets:
-      #   DEPLOY_HOST     — server IP or hostname
-      #   DEPLOY_USER     — SSH username (e.g. ubuntu)
-      #   DEPLOY_SSH_KEY  — SSH private key (contents of ~/.ssh/id_rsa)
-      #   DEPLOY_PATH     — absolute path to docker-compose.yml on the server
-      # ─────────────────────────────────────────────────────────────────
-      - name: Deploy to server
-        uses: appleboy/ssh-action@v1.2.0
-        with:
-          host: ${{ secrets.DEPLOY_HOST }}
-          username: ${{ secrets.DEPLOY_USER }}
-          key: ${{ secrets.DEPLOY_SSH_KEY }}
-          script: |
-            echo "${{ secrets.GITHUB_TOKEN }}" | \
-              docker login ghcr.io -u ${{ github.actor }} --password-stdin
-            docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
-            cd ${{ secrets.DEPLOY_PATH }}
-            docker compose up -d --no-build
-            docker image prune -f
+      - name: Print deploy instructions
+        run: |
+          echo "Image available at:"
+          echo "  ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+          echo "  ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-$(git rev-parse --short HEAD)"
+          echo ""
+          echo "To deploy on your server:"
+          echo "  docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+          echo "  docker compose up -d --no-build"

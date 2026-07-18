@@ -5,9 +5,11 @@ services:
       - "8080:8080"
     env_file: .env
     volumes:
-      - ./logs:/app/logs
+      - ./logs:/app/logs         # telemetry, live_config.json, token file
+      - ./data:/app/data         # persists data/history/ across container restarts
     environment:
       - TELEMETRY_LOG_FILE=/app/logs/telemetry.jsonl
+      - HISTORY_DIR=/app/data/history
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]

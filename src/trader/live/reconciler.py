@@ -175,3 +175,177 @@ async def reconcile_positions(
         logger.info("Reconciliation complete — no open positions found in Robinhood")
 
     return recovered
+
+
+def _parse_orders(result: object) -> list[dict]:
+    result = _unwrap_mcp(result)
+    if isinstance(result, list):
+        return result
+    if isinstance(result, dict):
+        inner = result.get("data", result)
+        if isinstance(inner, dict):
+            return inner.get("results", inner.get("orders", []))
+        return result.get("results", result.get("orders", []))
+    return []
+
+
+def _order_to_position(order: dict) -> Position | None:
+    """Convert one pending agentic order dict to a Position for monitoring.
+
+    Returns None if required fields are missing or the order is not in a
+    pending state that warrants tracking.
+    """
+    try:
+        state: str = (order.get("state") or "").lower()
+        # Only track orders that are still pending fill
+        if state not in ("queued", "confirmed", "unconfirmed", "pending"):
+            return None
+
+        option_legs: list = order.get("legs", []) or []
+        if not option_legs:
+            return None
+        leg = option_legs[0] if isinstance(option_legs[0], dict) else {}
+
+        ticker: str = (
+            order.get("chain_symbol")
+            or order.get("symbol")
+            or leg.get("chain_symbol")
+            or leg.get("symbol")
+            or ""
+        ).upper()
+        if not ticker:
+            return None
+
+        expiry_str: str = (
+            leg.get("expiration_date")
+            or order.get("expiration_date")
+            or ""
+        )
+        if not expiry_str:
+            return None
+        expiry = date.fromisoformat(expiry_str)
+
+        strike_raw = leg.get("strike_price") or order.get("strike_price") or "0"
+        strike = Decimal(str(strike_raw))
+        if not strike:
+            return None
+
+        option_type: str = (leg.get("option_type") or order.get("option_type") or "").lower()
+        if option_type not in ("call", "put"):
+            return None
+
+        quantity_str = order.get("quantity") or order.get("contracts") or "1"
+        quantity = int(Decimal(str(quantity_str)))
+        if quantity <= 0:
+            quantity = 1
+
+        # Use order price as a proxy for entry premium
+        price_raw = (
+            order.get("price")
+            or order.get("limit_price")
+            or leg.get("price")
+            or "0"
+        )
+        entry_premium = Decimal(str(price_raw))
+        # If price is missing we still track with a zero premium; stop-loss
+        # will be inactive but DTE protection remains.
+
+        order_id: str = str(order.get("id") or order.get("order_id") or "")
+        position_id = order_id or f"pending_{ticker}_{expiry}_{strike}_{option_type}"
+
+        created_raw = order.get("created_at") or order.get("placed_at")
+        try:
+            opened_at = datetime.fromisoformat(created_raw) if created_raw else datetime.now(timezone.utc)
+        except Exception:
+            opened_at = datetime.now(timezone.utc)
+
+        contract = OptionContract(
+            ticker=ticker,
+            expiry=expiry,
+            strike=strike,
+            type=option_type,
+            bid=Decimal("0"),
+            ask=Decimal("0"),
+            mid=entry_premium,
+            open_interest=0,
+            volume=0,
+        )
+
+        return Position(
+            position_id=position_id,
+            ticker=ticker,
+            contract=contract,
+            entry_premium=entry_premium,
+            target_level=None,
+            opened_at=opened_at,
+            quantity=quantity,
+            option_instrument_id=order_id or None,
+        )
+
+    except Exception as exc:
+        logger.warning("reconcile_open_orders: failed to parse order: %s — %s", order, exc)
+        return None
+
+
+async def reconcile_open_orders(
+    rh_tools: dict[str, "BaseTool"],
+    position_store: "PositionStore",
+) -> int:
+    """Fetch pending agentic option orders and add any that are not already
+    tracked in PositionStore.
+
+    This handles the case where a container restart occurs while an order is
+    in flight (queued/confirmed but not yet filled). The exit loop will then
+    monitor the position once it fills.
+
+    Returns the number of orders added to the store.
+    If the RH API does not support the filter parameters the function logs a
+    warning and returns 0 without raising.
+    """
+    logger.info("Reconciling pending agentic option orders from Robinhood…")
+    try:
+        result = await rh_call(rh_tools, "get_option_orders", {
+            "state": "queued",
+            "placed_by_agent": True,
+        })
+    except Exception as exc:
+        # Gracefully degrade — the API may not support these filter params
+        logger.warning(
+            "reconcile_open_orders: get_option_orders failed (%s) — skipping order reconciliation",
+            exc,
+        )
+        return 0
+
+    orders = _parse_orders(result)
+    logger.info("reconcile_open_orders: found %d order(s) from API", len(orders))
+
+    existing_ids: set[str] = {
+        pos.position_id for pos in await position_store.all()
+    }
+
+    added = 0
+    for order in orders:
+        pos = _order_to_position(order)
+        if pos is None:
+            continue
+        if pos.position_id in existing_ids:
+            logger.debug(
+                "reconcile_open_orders: order %s already in PositionStore — skipping",
+                pos.position_id,
+            )
+            continue
+        await position_store.add(pos)
+        logger.warning(
+            "reconcile_open_orders: added pending order %s %s %s %s exp=%s"
+            " (state=%s) to PositionStore for monitoring",
+            pos.ticker, pos.contract.type, pos.contract.strike, pos.position_id,
+            pos.contract.expiry, order.get("state", "?"),
+        )
+        added += 1
+
+    if added:
+        logger.warning("reconcile_open_orders: added %d pending order(s) to PositionStore", added)
+    else:
+        logger.info("reconcile_open_orders: no new pending orders to track")
+
+    return added

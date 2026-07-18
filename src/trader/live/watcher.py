@@ -124,6 +124,14 @@ class FlowWatcher:
     async def _poll(self) -> None:
         if self._config is not None:
             self._trigger.min_premium = self._config.flow_min_premium
+            # Sync contract-selector window from live config so dashboard edits
+            # apply from the next poll cycle without a restart.
+            self._selector.params = SelectorParams(
+                dte_min=self._config.selector_dte_min,
+                dte_max=self._config.selector_dte_max,
+                delta_min=self._config.selector_delta_min,
+                delta_max=self._config.selector_delta_max,
+            )
         t0 = _time.monotonic()
         try:
             # Server-side premium filter: only prints that could actually

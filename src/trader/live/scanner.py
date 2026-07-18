@@ -193,6 +193,16 @@ class GEXScanner:
     async def _scan(self) -> None:
         t_start = _time.monotonic()
 
+        # Sync contract-selector window from live config so dashboard edits apply
+        # from the next scan cycle without a restart.
+        if self._config is not None:
+            self._selector_params = SelectorParams(
+                dte_min=self._config.selector_dte_min,
+                dte_max=self._config.selector_dte_max,
+                delta_min=self._config.selector_delta_min,
+                delta_max=self._config.selector_delta_max,
+            )
+
         # Discover universe from flow activity this hour
         tickers, spot_hints = await self._discover_tickers()
         logger.info("GEXScanner: scanning %d tickers: %s", len(tickers), tickers)

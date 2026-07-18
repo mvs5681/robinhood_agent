@@ -33,12 +33,36 @@ class UWValidationError(Exception):
 
 def _unwrap(raw: Any) -> list[dict]:
     """Extract the list payload from MCP content format, {data:[...]}, or bare list."""
-    # MCP tools return [{'type': 'text', 'text': '<json>'}]
+    # MCP tools return content blocks: [{'type': 'text', 'text': <str|dict|list>}]
+    # Some adapters pre-parse 'text' into a Python object; others leave it as a JSON string.
+    # When there are multiple content blocks (large responses), merge their payloads.
     if isinstance(raw, list) and raw and isinstance(raw[0], dict) and "text" in raw[0]:
-        try:
-            raw = json.loads(raw[0]["text"])
-        except Exception:
-            pass
+        merged: list = []
+        any_parsed = False
+        for block in raw:
+            if not isinstance(block, dict):
+                continue
+            text_val = block.get("text")
+            if isinstance(text_val, str):
+                try:
+                    text_val = json.loads(text_val)
+                except Exception:
+                    continue  # skip unparseable blocks
+            # text_val is now a dict or list (pre-parsed or just decoded)
+            if isinstance(text_val, dict):
+                any_parsed = True
+                if "data" in text_val and isinstance(text_val["data"], list):
+                    merged.extend(text_val["data"])
+                elif "alert" in text_val:
+                    merged.append(text_val["alert"])
+                else:
+                    merged.append(text_val)
+            elif isinstance(text_val, list):
+                any_parsed = True
+                merged.extend(text_val)
+        if any_parsed:
+            return merged
+        # All blocks were unparseable — fall through to plain-format handling below
 
     if isinstance(raw, dict):
         if "data" in raw:

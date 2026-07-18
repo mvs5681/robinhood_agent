@@ -42,19 +42,27 @@ from trader.uw.validators import (
 async def _check(tbn: dict, label: str, tool_name: str, kwargs: dict, parser) -> tuple[str, int, str]:
     if tool_name not in tbn:
         return label, -1, "MISSING TOOL"
+    raw = None
     try:
         raw = await tbn[tool_name].ainvoke(kwargs)
         records = parser(raw)
         n = len(records)
         status = "OK" if n > 0 else "EMPTY"
         if n > 0:
-            # Show a couple of meaningful fields from the first record
             r = records[0]
             sample = {k: v for k, v in vars(r).items() if v is not None}
             keys = list(sample.keys())[:5]
             print(f"  {label}: {keys}")
         return label, n, status
     except Exception as exc:
+        # Print raw shape so the format issue is diagnosable without a debugger
+        if raw is not None:
+            if isinstance(raw, list) and raw and isinstance(raw[0], dict):
+                text_val = raw[0].get("text", "(no text key)")
+                text_preview = repr(text_val)[:200] if not isinstance(text_val, str) else text_val[:200]
+                print(f"  RAW block[0] keys={list(raw[0].keys())}  text type={type(text_val).__name__}  preview={text_preview}")
+            else:
+                print(f"  RAW type={type(raw).__name__}  preview={repr(raw)[:200]}")
         return label, 0, f"ERROR: {exc}"
 
 

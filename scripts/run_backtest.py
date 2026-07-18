@@ -81,6 +81,18 @@ def _print_results(result, start: date, end: date, json_mode: bool) -> None:
                 f"WR {metrics.win_rate:.0%}  avg {metrics.avg_pnl_pct:+.1%}"
             )
 
+    # Exit reason breakdown
+    closed = [r for r in result.records if r.status == "closed" and r.exit_signal]
+    if closed:
+        from collections import Counter
+        reason_counts = Counter(r.exit_signal.reason.value for r in closed)
+        print("\n  --- Exit Reasons ---")
+        for reason, count in sorted(reason_counts.items(), key=lambda x: -x[1]):
+            pnls = [r.pnl_pct for r in closed
+                    if r.exit_signal.reason.value == reason and r.pnl_pct is not None]
+            avg = sum(pnls) / len(pnls) if pnls else 0.0
+            print(f"  {reason:16s}  {count:3d}x  avg {avg:+.1%}")
+
 
 def main() -> None:
     args = _parse_args()

@@ -47,6 +47,20 @@ def _parse_args() -> argparse.Namespace:
         metavar="SCORE",
         help="Minimum blend composite score required to enter (0–1)",
     )
+    p.add_argument(
+        "--capital",
+        type=float,
+        default=2000.0,
+        metavar="DOLLARS",
+        help="Starting portfolio capital in USD for P&L simulation (default: 2000)",
+    )
+    p.add_argument(
+        "--max-trade-pct",
+        type=float,
+        default=0.25,
+        metavar="PCT",
+        help="Max fraction of available cash to spend per trade (default: 0.25 = 25%%)",
+    )
     p.add_argument("--json", action="store_true", help="Print metrics as JSON")
     p.add_argument("-v", "--verbose", action="store_true", help="Enable debug logging")
     return p.parse_args()
@@ -93,6 +107,50 @@ def _print_results(result, start: date, end: date, json_mode: bool) -> None:
             avg = sum(pnls) / len(pnls) if pnls else 0.0
             print(f"  {reason:16s}  {count:3d}x  avg {avg:+.1%}")
 
+    # Portfolio simulation
+    p = result.portfolio
+    if p:
+        sign = "+" if p.total_pnl_dollars >= 0 else ""
+        print(f"\n=== Portfolio Simulation  (starting ${p.initial_capital:,.2f}) ===")
+        print(f"  Final value:    ${p.final_value:,.2f}  ({p.total_return_pct:+.1%})")
+        print(f"  Total P&L:      {sign}${p.total_pnl_dollars:,.2f}")
+        print(f"  Peak value:     ${p.peak_value:,.2f}")
+        print(f"  Max drawdown:   ${p.max_drawdown_dollars:,.2f}  ({p.max_drawdown_pct:.1%})")
+
+        # Per-trade dollar table
+        trade_rows = [
+            r for r in result.records
+            if r.status == "closed" and r.pnl_dollars is not None
+        ]
+        if trade_rows:
+            print(f"\n  {'Date':10s}  {'Ticker':6s}  {'Type':4s}  {'Ctrs':4s}  "
+                  f"{'Cost':>8s}  {'P&L $':>10s}  {'P&L %':>7s}  Reason")
+            print("  " + "-" * 72)
+            for r in trade_rows:
+                pos = r.position
+                sig = r.exit_signal
+                print(
+                    f"  {r.entry_date}  {pos.ticker:6s}  {pos.contract.type:4s}  "
+                    f"{pos.contracts:4d}  "
+                    f"${float(pos.entry_cost):>7,.2f}  "
+                    f"${r.pnl_dollars:>+9,.2f}  "
+                    f"{r.pnl_pct:>+6.1%}  "
+                    f"{sig.reason.value}"
+                )
+
+        # Equity curve (show every ~5th row to keep output concise)
+        if p.equity_curve:
+            curve = p.equity_curve
+            step = max(1, len(curve) // 10)
+            sampled = curve[::step]
+            if curve[-1] not in sampled:
+                sampled.append(curve[-1])
+            print(f"\n  --- Equity Curve ---")
+            for d, v in sampled:
+                bar_len = int((v / p.initial_capital - 0.5) * 40)
+                bar = ("█" * max(0, bar_len)).ljust(40)
+                print(f"  {d}  ${v:>9,.2f}  {bar}")
+
 
 def main() -> None:
     args = _parse_args()
@@ -113,6 +171,8 @@ def main() -> None:
         end_date=end,
         tickers=args.tickers,
         max_concurrent_positions=args.max_positions,
+        initial_capital=args.capital,
+        max_trade_pct=args.max_trade_pct,
     )
 
     result = asyncio.run(harness.run())

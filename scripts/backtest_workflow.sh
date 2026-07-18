@@ -17,6 +17,7 @@ TICKERS="SPY"            # space-separated, e.g. "SPY QQQ AAPL"
 START_DATE="2025-01-02"  # first trading day to backtest
 END_DATE="2025-03-31"    # last  trading day to backtest
 OUT_DIR="data/history"   # where fixture files are written
+CAPITAL="2000"           # starting portfolio capital in USD
 
 # ── Derived ──────────────────────────────────────────────────────────────────
 
@@ -44,6 +45,7 @@ echo " GEX Backtest Workflow"
 echo "========================================"
 echo "  Tickers   : $TICKERS"
 echo "  Date range: $START_DATE → $END_DATE"
+echo "  Capital   : \$$CAPITAL"
 echo "  Fixtures  : $OUT_DIR"
 echo "  Plan      : Polygon free tier (5 calls/min, BS pricing)"
 echo "========================================"
@@ -74,10 +76,11 @@ echo ""
 
 # shellcheck disable=SC2086
 python scripts/run_backtest.py \
-    --fixtures "$OUT_DIR" \
-    --start    "$START_DATE" \
-    --end      "$END_DATE" \
-    --tickers  $TICKERS \
+    --fixtures      "$OUT_DIR" \
+    --start         "$START_DATE" \
+    --end           "$END_DATE" \
+    --tickers       $TICKERS \
+    --capital       "$CAPITAL" \
     --max-positions 3
 
 echo ""

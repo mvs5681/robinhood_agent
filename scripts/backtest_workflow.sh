@@ -5,13 +5,42 @@
 #   1. pip install -e .  (from repo root)
 #   2. Set POLYGON_API_KEY in .env
 #
-# Edit variables below, then:
-#   chmod +x scripts/backtest_workflow.sh
-#   ./scripts/backtest_workflow.sh
+# Edit the configuration block below, then:
+#   bash scripts/backtest_workflow.sh
 
 set -euo pipefail
 
-# ── Configuration ────────────────────────────────────────────────────────────
+# ── Setup ─────────────────────────────────────────────────────────────────────
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# Load POLYGON_API_KEY and other secrets from .env — but only if not already
+# set in the environment (so the config block below always wins).
+if [[ -f "$REPO_ROOT/.env" ]]; then
+    while IFS='=' read -r key val; do
+        # Skip comments and blank lines
+        [[ "$key" =~ ^#.*$ || -z "$key" ]] && continue
+        # Only export if the variable is not already set in the environment
+        [[ -z "${!key+x}" ]] && export "$key=$val"
+    done < "$REPO_ROOT/.env"
+fi
+
+if [[ -z "${POLYGON_API_KEY:-}" ]]; then
+    echo "ERROR: POLYGON_API_KEY is not set."
+    echo "Add it to $REPO_ROOT/.env:  POLYGON_API_KEY=your_key_here"
+    exit 1
+fi
+
+cd "$REPO_ROOT"
+
+PYTHON="$REPO_ROOT/.venv/bin/python3.12"
+if [[ ! -x "$PYTHON" ]]; then
+    echo "ERROR: $PYTHON not found. Run: python3.12 -m venv .venv && .venv/bin/pip install -e ."
+    exit 1
+fi
+
+# ── Configuration (edit here — always overrides .env) ────────────────────────
 
 TICKERS="SPY"            # space-separated, e.g. "SPY QQQ AAPL"
 CAPITAL="2000"           # starting portfolio capital in USD
@@ -28,31 +57,7 @@ RUN2_LABEL="2026_h1"
 RUN2_START="2026-01-20"
 RUN2_END="2026-07-17"
 
-# ── Setup ─────────────────────────────────────────────────────────────────────
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-
-if [[ -f "$REPO_ROOT/.env" ]]; then
-    set -a
-    # shellcheck disable=SC1091
-    source "$REPO_ROOT/.env"
-    set +a
-fi
-
-if [[ -z "${POLYGON_API_KEY:-}" ]]; then
-    echo "ERROR: POLYGON_API_KEY is not set."
-    echo "Add it to $REPO_ROOT/.env:  POLYGON_API_KEY=your_key_here"
-    exit 1
-fi
-
-cd "$REPO_ROOT"
-
-PYTHON="$REPO_ROOT/.venv/bin/python3.12"
-if [[ ! -x "$PYTHON" ]]; then
-    echo "ERROR: $PYTHON not found. Run: python3.12 -m venv .venv && .venv/bin/pip install -e ."
-    exit 1
-fi
+# ─────────────────────────────────────────────────────────────────────────────
 
 echo "╔══════════════════════════════════════════╗"
 echo "║       GEX Backtest — Dual Run            ║"
@@ -80,10 +85,10 @@ run_period() {
 
     # shellcheck disable=SC2086
     "$PYTHON" scripts/fetch_polygon_history.py \
-        --start    "$start" \
-        --end      "$end" \
-        --tickers  $TICKERS \
-        --out      "$FIXTURES_DIR"
+        --start   "$start" \
+        --end     "$end" \
+        --tickers $TICKERS \
+        --out     "$FIXTURES_DIR"
 
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -127,9 +132,8 @@ echo "    $RESULTS_DIR/$RUN2_LABEL/equity.csv   — daily portfolio value (H1 20
 echo "    $RESULTS_DIR/$RUN2_LABEL/summary.csv  — key metrics (H1 2026)"
 echo ""
 
-# Quick side-by-side summary if python is available
 "$PYTHON" - <<'PYEOF'
-import csv, sys
+import csv
 from pathlib import Path
 
 runs = [("H1 2025", "results/2025_h1"), ("H1 2026", "results/2026_h1")]
@@ -162,7 +166,6 @@ for label, path in runs:
 for key, display in metrics_to_show:
     v1 = data.get("H1 2025", {}).get(key, "n/a")
     v2 = data.get("H1 2026", {}).get(key, "n/a")
-    # Format percentages
     if key in ("win_rate", "avg_pnl_pct", "total_return_pct"):
         try: v1 = f"{float(v1):+.1%}"
         except: pass

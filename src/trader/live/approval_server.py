@@ -16,6 +16,7 @@ Dashboard (served at /):
     GET  /api/telemetry/funnel     — pipeline funnel for today
     GET  /api/telemetry/recent     — last 50 telemetry events
     GET  /api/telemetry/pnl        — exit_signal pnl_pct time series
+    GET  /api/positions            — open positions from PositionStore
 """
 
 from __future__ import annotations
@@ -49,6 +50,29 @@ def _json_response(data, status: int = 200) -> web.Response:
         content_type="application/json",
         status=status,
     )
+
+
+def _serialize_position(p: "Position") -> dict:
+    """Serialize a Position for the /api/positions endpoint."""
+    sc = p.contract
+    return {
+        "position_id": p.position_id,
+        "ticker": p.ticker,
+        "entry_premium": float(p.entry_premium),
+        "target_level": float(p.target_level) if p.target_level is not None else None,
+        "opened_at": p.opened_at.isoformat(),
+        "quantity": p.quantity,
+        "contract": {
+            "strike": float(sc.strike),
+            "expiry": sc.expiry.isoformat() if sc.expiry else None,
+            "type": sc.type,
+            "delta": float(sc.delta) if sc.delta is not None else None,
+            "mid": float(sc.mid),
+            "spread_pct": float(sc.spread_pct),
+            "open_interest": sc.open_interest,
+            "implied_volatility": float(sc.implied_volatility) if sc.implied_volatility is not None else None,
+        },
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -221,6 +245,54 @@ tr:last-child td { border-bottom:none; }
 ::-webkit-scrollbar-thumb { background:var(--border); border-radius:3px; }
 [data-tip] { cursor:help; border-bottom:1px dashed var(--muted); }
 
+/* ── Phase sections ── */
+.phase-section { margin-bottom:12px; background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); }
+.phase-header { display:flex; align-items:center; gap:10px; padding:12px 16px; cursor:pointer; user-select:none; transition:background .15s; }
+.phase-header:hover { background:rgba(255,255,255,.03); }
+.phase-title { font-size:14px; font-weight:600; flex:1; }
+.phase-count { font-size:11px; color:var(--muted); background:var(--bg); padding:2px 8px; border-radius:10px; }
+.phase-chevron { font-size:11px; color:var(--muted); }
+.phase-body { padding:0 16px 16px; border-top:1px solid var(--border); }
+.phase-body.collapsed { display:none; }
+.phase-subtitle { font-size:11px; color:var(--muted); margin:10px 0 8px; }
+.phase-item { background:var(--bg); border-radius:4px; padding:10px 12px; margin-bottom:8px; }
+.phase-item-header { display:flex; justify-content:space-between; align-items:center; font-size:12px; margin-bottom:6px; flex-wrap:wrap; gap:4px; }
+.phase-item-body { display:flex; gap:16px; flex-wrap:wrap; font-size:11px; color:var(--muted); }
+.phase-item-body b { color:var(--text); }
+
+/* ── Drawer drag handle ── */
+#drawer-drag { display:none; justify-content:center; padding:8px 0 4px; }
+#drawer-drag-handle { width:40px; height:4px; background:var(--border); border-radius:2px; }
+
+/* ── Mobile layout (≤640px) ── */
+@media (max-width:640px) {
+  .tab-pane { padding:12px 8px; }
+  nav.tabs { padding:0 8px; overflow-x:auto; flex-wrap:nowrap; -webkit-overflow-scrolling:touch; scrollbar-width:none; }
+  nav.tabs::-webkit-scrollbar { display:none; }
+  nav.tabs button { flex-shrink:0; padding:10px 12px; font-size:12px; }
+  header { padding:8px 12px; }
+  header h1 { font-size:14px; }
+  #market-grid { grid-template-columns:1fr; }
+  .prop-grid { grid-template-columns:1fr; }
+  .proposal-card { min-width:0; }
+  #decisions-wrap { overflow-x:auto; -webkit-overflow-scrolling:touch; }
+  .pnl-stats-row { gap:8px; }
+  .stat-card { min-width:auto; flex:1 1 calc(50% - 4px); }
+  .pnl-chart-outer { padding:12px 8px; }
+  #glossary-btn { right:auto; left:20px; }
+  #glossary-panel { right:auto; left:20px; width:calc(100vw - 40px); max-width:none; }
+  /* Drawer becomes a bottom sheet on mobile */
+  #drawer {
+    top:auto; right:0; left:0; bottom:0;
+    width:100%; height:85vh;
+    border-left:none; border-top:1px solid var(--border);
+    border-radius:12px 12px 0 0;
+    transform:translateY(100%);
+  }
+  #drawer.open { transform:translateY(0); }
+  #drawer-drag { display:flex; }
+}
+
 /* ── P&L tab ── */
 .pnl-stats-row { display:flex; gap:12px; flex-wrap:wrap; margin-bottom:20px; }
 .stat-card { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius);
@@ -255,8 +327,8 @@ const GLOSSARY = {
   "Flow Pressure": "Fraction of flow alerts aligned with the trade direction + net-premium momentum over 4 hours. Measures persistence of directional conviction.",
   "IV Cost": "Implied volatility cost score. Low IV percentile = cheap options = high score. Entering when IV is elevated means overpaying for gamma — lowers conviction.",
   "Technicals": "RSI + MACD timing alignment score. Measures how well price momentum and trend confirm the GEX directional setup.",
-  "Delta": "Option price change per $1 move in the underlying. Target range: 0.30–0.55 (near-the-money). Deep ITM has high delta but poor leverage; far OTM has low probability.",
-  "DTE": "Days To Expiration. Target: 7–45 days. Too short increases theta decay risk; too long ties up capital and reduces leverage.",
+  "Delta": "Option price change per $1 move in the underlying. Target range: 0.30–0.45 (near-the-money). Deep ITM has high delta but poor leverage; far OTM has low probability.",
+  "DTE": "Days To Expiration. Target: 21–30 days. Too short increases theta decay risk; too long ties up capital and reduces leverage.",
   "Spread %": "Bid-ask spread as a % of mid price. High spread = poor liquidity = expensive to enter/exit. Filtered above 15%.",
   "Alert Premium": "Total dollar value of the whale option print (size × premium × 100). Minimum $100K to trigger the flow gate.",
   "Sweep": "Order routed across multiple exchanges simultaneously to fill immediately — signals urgency and strong directional conviction.",
@@ -465,7 +537,7 @@ function radarChart(scores) {
   const ang = i => (Math.PI*2*i/n) - Math.PI/2;
   const pt  = (i,v) => [cx + Math.cos(ang(i))*r*v, cy + Math.sin(ang(i))*r*v];
 
-  let s = `<svg viewBox="0 0 220 220" width="200" height="200">`;
+  let s = `<svg viewBox="0 0 220 220" style="width:100%;max-width:200px;display:block;margin:0 auto">`;
   // rings
   for (const v of [.25,.5,.75,1]) {
     const pts = keys.map((_,i)=>pt(i,v).join(',')).join(' ');
@@ -682,6 +754,158 @@ async function loadLog() {
     }).join('')}</tbody></table>`;
 }
 
+// ── Phases tab ────────────────────────────────────────────────────────
+async function loadPhases() {
+  const wrap = document.getElementById('phases-wrap');
+  wrap.innerHTML = '<div class="empty-msg">Loading…</div>';
+
+  const [market, proposals, positions, telemetry] = await Promise.all([
+    apiFetch('/api/market').then(r => r.json()).catch(() => []),
+    apiFetch('/proposals').then(r => r.json()).catch(() => []),
+    apiFetch('/api/positions').then(r => r.json()).catch(() => []),
+    apiFetch('/api/telemetry/recent?n=200').then(r => r.json()).catch(() => []),
+  ]);
+
+  const exitEvents = telemetry
+    .filter(e => e.stage === 'exit_signal' && e.result === 'ok')
+    .reverse();
+
+  wrap.innerHTML = [
+    phaseSection('discovery', 'Discovery',
+      'GEX scanner results — tickers found in the most recent scan cycle.',
+      market, renderDiscoveryRows),
+    phaseSection('proposed', 'Proposed',
+      'Candidates that cleared all 6 gates — awaiting human approval.',
+      proposals, renderProposedRows),
+    phaseSection('purchased', 'Purchased',
+      'Open positions currently held.',
+      positions, renderPurchasedRows),
+    phaseSection('exit', 'Exit Loop',
+      'Recent exit signals from the exit monitor.',
+      exitEvents, renderExitRows),
+  ].join('');
+
+  wrap.querySelectorAll('.phase-header').forEach(h => {
+    h.addEventListener('click', () => {
+      const body = h.nextElementSibling;
+      body.classList.toggle('collapsed');
+      h.querySelector('.phase-chevron').textContent =
+        body.classList.contains('collapsed') ? '▶' : '▼';
+    });
+  });
+}
+
+function phaseSection(id, title, subtitle, items, renderer) {
+  const count = items.length;
+  const body = count === 0
+    ? '<div class="empty-msg">Nothing here yet.</div>'
+    : renderer(items);
+  return `<div class="phase-section" id="phase-${id}">
+    <div class="phase-header">
+      <span class="phase-title">${title}</span>
+      <span class="phase-count">${count}</span>
+      <span class="phase-chevron">▼</span>
+    </div>
+    <div class="phase-body">
+      <div class="phase-subtitle">${subtitle}</div>
+      ${body}
+    </div>
+  </div>`;
+}
+
+function renderDiscoveryRows(items) {
+  return `<div style="overflow-x:auto;-webkit-overflow-scrolling:touch"><table>
+    <thead><tr>
+      <th>Ticker</th><th>Regime</th><th>Direction</th>
+      <th>Confidence</th><th>Flip Point</th><th>Target</th>
+    </tr></thead>
+    <tbody>${items.map(t => {
+      const regClass = t.regime === 'negative' ? 'badge-neg' : t.regime === 'positive' ? 'badge-pos' : 'badge-mix';
+      const regText  = t.regime === 'negative' ? 'NEG' : t.regime === 'positive' ? 'POS' : 'MIX';
+      const dir = t.direction === 'call' ? '↑ Call' : t.direction === 'put' ? '↓ Put' : '—';
+      return `<tr class="clickable" onclick="openDrawer('market:${t.ticker}')">
+        <td><b>${t.ticker}</b></td>
+        <td><span class="badge ${regClass}">${regText}</span></td>
+        <td>${dir}</td>
+        <td>${fmtPct(t.confidence)}</td>
+        <td>${fmtPrice(t.flip_point)}</td>
+        <td>${fmtPrice(t.target_level)}</td>
+      </tr>`;
+    }).join('')}</tbody>
+  </table></div>`;
+}
+
+function renderProposedRows(items) {
+  return items.map(p => {
+    const sc = p.contract || {};
+    const gs = p.gex_setup || {};
+    const bs = p.blend_scores || {};
+    const dir = gs.candidate_direction === 'call' ? '↑ Call' : gs.candidate_direction === 'put' ? '↓ Put' : '—';
+    return `<div class="phase-item">
+      <div class="phase-item-header">
+        <b>${p.ticker}</b>
+        <span>${dir} · ${capitalize(gs.regime || '')} · Score: ${(bs.composite || 0).toFixed(2)}</span>
+      </div>
+      <div class="phase-item-body">
+        <span>Strike <b>${fmtPrice(sc.strike)}</b></span>
+        <span>Expiry <b>${sc.expiry || '—'}</b></span>
+        <span>Delta <b>${tip((sc.delta != null ? parseFloat(sc.delta).toFixed(3) : '—'), 'Delta')}</b></span>
+        <span>Mid <b>${fmtPrice(sc.mid)}</b></span>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function renderPurchasedRows(items) {
+  const today = new Date();
+  return `<div style="overflow-x:auto;-webkit-overflow-scrolling:touch"><table>
+    <thead><tr>
+      <th>Ticker</th><th>Strike/Type</th><th>Expiry</th>
+      <th>Entry</th><th>Target</th><th>Stop</th><th>DTE</th>
+    </tr></thead>
+    <tbody>${items.map(p => {
+      const sc = p.contract || {};
+      const expDate = sc.expiry ? new Date(sc.expiry) : null;
+      const dte = expDate ? Math.max(0, Math.ceil((expDate - today) / 86400000)) : '—';
+      const stop = p.entry_premium != null
+        ? '$' + (parseFloat(p.entry_premium) * 0.65).toFixed(2) : '—';
+      return `<tr>
+        <td><b>${p.ticker}</b></td>
+        <td>${fmtPrice(sc.strike)} ${(sc.type || '').toUpperCase()}</td>
+        <td>${sc.expiry || '—'}</td>
+        <td>${fmtPrice(p.entry_premium)}</td>
+        <td>${fmtPrice(p.target_level)}</td>
+        <td>${stop}</td>
+        <td>${dte}</td>
+      </tr>`;
+    }).join('')}</tbody>
+  </table></div>`;
+}
+
+function renderExitRows(items) {
+  return `<div style="overflow-x:auto;-webkit-overflow-scrolling:touch"><table>
+    <thead><tr>
+      <th>Ticker</th><th>Reason</th><th>P&amp;L %</th>
+      <th>Entry</th><th>Exit</th><th>DTE at Exit</th>
+    </tr></thead>
+    <tbody>${items.map(e => {
+      const pct = (e.pnl_pct || 0) * 100;
+      const cls  = pct >= 0 ? 'result-ok' : 'result-err';
+      const sign = pct >= 0 ? '+' : '';
+      const reason = (e.reason || '').replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+      const ts = e.timestamp ? new Date(e.timestamp).toLocaleString() : '';
+      return `<tr>
+        <td><b>${e.ticker}</b></td>
+        <td>${reason}</td>
+        <td class="${cls}"><b>${sign}${pct.toFixed(1)}%</b></td>
+        <td>${fmtPrice(e.entry_premium)}</td>
+        <td>${fmtPrice(e.current_premium)}</td>
+        <td>${e.dte_remaining ?? '—'}</td>
+      </tr>`;
+    }).join('')}</tbody>
+  </table></div>`;
+}
+
 // ── Overview stats ────────────────────────────────────────────────────
 async function loadOverview() {
   const d = await fetch('/api/telemetry/summary').then(r=>r.json());
@@ -834,6 +1058,7 @@ function refreshAll() {
   if (activeTab === 'proposals')  loadProposals();
   if (activeTab === 'log')        loadLog();
   if (activeTab === 'pnl')        loadPnl();
+  if (activeTab === 'phases')     loadPhases();
 }
 
 // ── Settings tab ──────────────────────────────────────────────────────
@@ -850,6 +1075,14 @@ const SETTINGS_FIELDS = [
    hint:'Close if option premium drops this fraction from entry (0.01–0.95, e.g. 0.35 = 35%)'},
   {key:'dte_floor', label:'DTE Floor (days)', type:'number',
    hint:'Close positions when days-to-expiry reaches this value (0–30)'},
+  {key:'selector_dte_min', label:'Contract Selector DTE Min (days)', type:'number',
+   hint:'Minimum days-to-expiry when selecting contracts (default 21)'},
+  {key:'selector_dte_max', label:'Contract Selector DTE Max (days)', type:'number',
+   hint:'Maximum days-to-expiry when selecting contracts (default 30)'},
+  {key:'selector_delta_min', label:'Contract Selector Delta Min', type:'number', step:'0.01',
+   hint:'Minimum absolute delta for selected contracts (default 0.30)'},
+  {key:'selector_delta_max', label:'Contract Selector Delta Max', type:'number', step:'0.01',
+   hint:'Maximum absolute delta for selected contracts (default 0.45)'},
 ];
 
 async function loadSettings() {
@@ -965,6 +1198,7 @@ _DASHBOARD_BODY = """
 
 <nav class="tabs">
   <button class="active" data-tab="market">Market</button>
+  <button data-tab="phases">Phases</button>
   <button data-tab="decisions">Decisions</button>
   <button data-tab="proposals">Proposals</button>
   <button data-tab="log">Log</button>
@@ -974,6 +1208,10 @@ _DASHBOARD_BODY = """
 
 <div id="tab-market" class="tab-pane active">
   <div id="market-grid"><div class="empty-msg">Loading…</div></div>
+</div>
+
+<div id="tab-phases" class="tab-pane">
+  <div id="phases-wrap"><div class="empty-msg">Loading…</div></div>
 </div>
 
 <div id="tab-decisions" class="tab-pane">
@@ -998,8 +1236,9 @@ _DASHBOARD_BODY = """
   <div id="settings-wrap"><div class="empty-msg">Loading…</div></div>
 </div>
 
-<!-- Detail drawer -->
+<!-- Detail drawer (side panel on desktop, bottom sheet on mobile) -->
 <div id="drawer">
+  <div id="drawer-drag"><div id="drawer-drag-handle"></div></div>
   <div id="drawer-header">
     <span id="drawer-title">Decision Detail</span>
     <button id="drawer-close">×</button>
@@ -1218,6 +1457,13 @@ def create_app(
         logger.info("Config updated via dashboard: %s", config.to_dict())
         return _json_response({"status": "saved", "config": config.to_dict()})
 
+    # ── Positions API ───────────────────────────────────────────────────
+    async def list_positions(req: web.Request) -> web.Response:
+        if position_store is None:
+            return _json_response([])
+        positions = await position_store.all()
+        return _json_response([_serialize_position(p) for p in positions])
+
     # ── Telemetry API ───────────────────────────────────────────────────
     async def telemetry_summary(req: web.Request) -> web.Response:
         return _json_response(reader.summary_last_hour())
@@ -1244,6 +1490,7 @@ def create_app(
     app.router.add_get("/api/status", status)
     app.router.add_get("/api/config", get_config)
     app.router.add_post("/api/config", update_config)
+    app.router.add_get("/api/positions", list_positions)
     app.router.add_get("/api/telemetry/summary", telemetry_summary)
     app.router.add_get("/api/telemetry/funnel", telemetry_funnel)
     app.router.add_get("/api/telemetry/recent", telemetry_recent)

@@ -24,9 +24,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from aiohttp import web
 
 from trader.executor.schemas import ExecutionMode
+from trader.exits.schemas import Position
 from trader.gex.schemas import GEXRegime, GEXSetup, GEXWall
 from trader.live.approval_server import create_app
 from trader.live.cache import GEXCache, TickerSnapshot
+from trader.live.position_store import PositionStore
 from trader.live.proposals import ProposalStore
 from trader.live.telemetry_reader import TelemetryReader
 from trader.scoring.schemas import BlendScores, CandidateSignal
@@ -273,6 +275,25 @@ async def _populate_proposals(store: ProposalStore) -> None:
         await store.add(candidate, run_id=run_id)
 
 
+async def _populate_positions(store: PositionStore) -> None:
+    """Add fake open positions to the PositionStore for the Purchased phase."""
+    rng = random.Random(13)
+    for ticker, regime, direction, spot in FAKE_POSITIONS:
+        contract = _make_contract(ticker, direction, spot)
+        setup = _make_setup(ticker, regime, direction, spot)
+        entry = Decimal(str(round(rng.uniform(2.0, 6.0), 2)))
+        pos = Position(
+            position_id=f"pos_{ticker}_{rng.randint(10000, 99999)}",
+            ticker=ticker,
+            contract=contract,
+            entry_premium=entry,
+            target_level=setup.target_level,
+            opened_at=datetime.now(timezone.utc) - timedelta(minutes=rng.randint(30, 180)),
+            quantity=1,
+        )
+        await store.add(pos)
+
+
 async def _build_fake_cache() -> GEXCache:
     """Populate the GEX cache with fake ticker snapshots for the Market tab."""
     cache = GEXCache()
@@ -313,6 +334,10 @@ async def main() -> None:
     await _populate_proposals(proposal_store)
     print(f"Proposals: {len(FAKE_POSITIONS)} pending")
 
+    position_store = PositionStore()
+    await _populate_positions(position_store)
+    print(f"Positions: {position_store.count} open")
+
     cache = await _build_fake_cache()
     print(f"Market cache: {len(cache.tickers)} tickers")
 
@@ -324,6 +349,7 @@ async def main() -> None:
         executor=executor,  # type: ignore[arg-type]
         telemetry_reader=tel_reader,
         cache=cache,
+        position_store=position_store,
     )
 
     runner = web.AppRunner(app)

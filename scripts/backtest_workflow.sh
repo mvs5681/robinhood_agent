@@ -14,8 +14,8 @@ set -euo pipefail
 # ── Configuration ────────────────────────────────────────────────────────────
 
 TICKERS="SPY"            # space-separated, e.g. "SPY QQQ AAPL"
-START_DATE="2025-01-02"  # first trading day to backtest
-END_DATE="2025-03-31"    # last  trading day to backtest
+START_DATE="2026-01-20"  # first trading day to backtest (~6 months ago)
+END_DATE="2026-07-17"    # last trading day (most recent close)
 OUT_DIR="data/history"   # where fixture files are written
 CAPITAL="2000"           # starting portfolio capital in USD
 

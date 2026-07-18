@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import sys
 from datetime import date, timedelta
 from pathlib import Path
@@ -28,89 +27,85 @@ except ImportError:
     pass
 
 from trader.uw.mcp_config import load_uw_tools, tools_by_name
+from trader.uw.validators import (
+    _unwrap,
+    parse_darkpool_prints,
+    parse_flow_alerts,
+    parse_market_tide,
+    parse_net_prem_ticks,
+    parse_option_contracts,
+    parse_spot_gex_by_strike,
+    parse_technical_indicator,
+)
 
 
-def _count(raw) -> int:
-    if isinstance(raw, list):
-        return len(raw)
-    if isinstance(raw, dict):
-        data = raw.get("data", raw)
-        return len(data) if isinstance(data, list) else 1
-    return 0
-
-
-def _status(n: int) -> str:
-    return "OK" if n > 0 else "EMPTY"
+async def _check(tbn: dict, label: str, tool_name: str, kwargs: dict, parser) -> tuple[str, int, str]:
+    if tool_name not in tbn:
+        return label, -1, "MISSING TOOL"
+    try:
+        raw = await tbn[tool_name].ainvoke(kwargs)
+        records = parser(raw)
+        n = len(records)
+        status = "OK" if n > 0 else "EMPTY"
+        if n > 0:
+            # Show a couple of meaningful fields from the first record
+            r = records[0]
+            sample = {k: v for k, v in vars(r).items() if v is not None}
+            keys = list(sample.keys())[:5]
+            print(f"  {label}: {keys}")
+        return label, n, status
+    except Exception as exc:
+        return label, 0, f"ERROR: {exc}"
 
 
 async def _run(ticker: str, test_date: date) -> None:
     print(f"\nConnecting to UW MCP…")
     tools_list = await load_uw_tools()
     tbn = tools_by_name(tools_list)
-    print(f"Connected. {len(tbn)} tools available: {sorted(tbn)}\n")
+    print(f"Connected. {len(tbn)} tools available.\n")
 
     date_str = test_date.isoformat()
     next_day = (test_date + timedelta(days=1)).isoformat()
 
-    results: list[tuple[str, int, str]] = []
+    checks = [
+        ("get_market_tide (historical)",
+         "get_market_tide", {"date": date_str},
+         parse_market_tide),
 
-    async def _check(label: str, tool_name: str, kwargs: dict) -> None:
-        if tool_name not in tbn:
-            results.append((label, -1, "MISSING TOOL"))
-            return
-        try:
-            raw = await tbn[tool_name].ainvoke(kwargs)
-            n = _count(raw)
-            results.append((label, n, _status(n)))
-            if n > 0:
-                items = raw.get("data", raw) if isinstance(raw, dict) else raw
-                sample = items[0] if isinstance(items, list) and items else items
-                # Print first record keys so user can validate the shape
-                if isinstance(sample, dict):
-                    print(f"  {label}: sample keys = {list(sample.keys())[:8]}")
-        except Exception as exc:
-            results.append((label, 0, f"ERROR: {exc}"))
+        ("get_flow_alerts (historical)",
+         "get_flow_alerts",
+         {"limit": 50, "newer_than": date_str, "older_than": next_day},
+         parse_flow_alerts),
 
-    # Test each endpoint that fetch_history.py uses
-    await _check(
-        "get_market_tide (historical)",
-        "get_market_tide",
-        {"date": date_str},
-    )
-    await _check(
-        "get_flow_alerts (historical)",
-        "get_flow_alerts",
-        {
-            "limit": 50,
-            "newer_than": date_str,
-            "older_than": next_day,
-        },
-    )
-    await _check(
-        "get_greek_exposure_by_strike",
-        "get_greek_exposure_by_strike",
-        {"ticker": ticker, "date": date_str},
-    )
-    await _check(
-        "get_dark_pool_trades",
-        "get_dark_pool_trades",
-        {"ticker_symbol": ticker, "date": date_str, "limit": 20},
-    )
-    await _check(
-        "get_flow_per_strike",
-        "get_flow_per_strike",
-        {"ticker": ticker, "date": date_str},
-    )
-    await _check(
-        "get_options_chain (historical)",
-        "get_options_chain",
-        {"ticker": ticker, "date": date_str, "limit": 20},
-    )
-    await _check(
-        "get_extended_technical_indicator (RSI, no date)",
-        "get_extended_technical_indicator",
-        {"ticker": ticker, "function": "RSI", "interval": "daily"},
-    )
+        ("get_greek_exposure_by_strike",
+         "get_greek_exposure_by_strike",
+         {"ticker": ticker, "date": date_str},
+         parse_spot_gex_by_strike),
+
+        ("get_dark_pool_trades",
+         "get_dark_pool_trades",
+         {"ticker_symbol": ticker, "date": date_str, "limit": 20},
+         parse_darkpool_prints),
+
+        ("get_flow_per_strike",
+         "get_flow_per_strike",
+         {"ticker": ticker, "date": date_str},
+         parse_net_prem_ticks),
+
+        ("get_options_chain (historical)",
+         "get_options_chain",
+         {"ticker": ticker, "date": date_str, "limit": 20},
+         parse_option_contracts),
+
+        ("get_extended_technical_indicator",
+         "get_extended_technical_indicator",
+         {"ticker": ticker, "function": "RSI", "interval": "daily"},
+         lambda raw: parse_technical_indicator(raw, "RSI")),
+    ]
+
+    results = []
+    for label, tool_name, kwargs, parser in checks:
+        results.append(await _check(tbn, label, tool_name, kwargs, parser))
 
     print(f"\n{'Endpoint':<44} {'Records':>8}  Status")
     print("-" * 62)
@@ -128,31 +123,23 @@ async def _run(ticker: str, test_date: date) -> None:
         print("  → Check UW_API_TOKEN is set and the MCP server is reachable.")
     if empty:
         print(f"EMPTY ({len(empty)}): {empty}")
-        print(f"  → UW may not have data for {ticker} on {test_date}.")
-        print("  → Try a more recent date (last 6 months is usually available).")
-        print("  → Index tickers (SPY) tend to have better coverage than single stocks.")
-
+        print(f"  → UW has no data for {ticker} on {test_date}.")
+        print("  → Try a more recent date or a higher-volume ticker like SPY.")
     if not errors and not empty:
-        print(f"All endpoints returned data for {ticker} on {test_date}.")
+        print(f"All endpoints returned real records for {ticker} on {test_date}.")
         print("You can now run fetch_history.py to download a full date range.")
 
 
 def main() -> None:
     p = argparse.ArgumentParser(description="Validate UW historical API access")
     p.add_argument("--ticker", default="SPY", help="Ticker to test (default: SPY)")
-    p.add_argument(
-        "--date",
-        default=None,
-        help="Historical date YYYY-MM-DD (default: 30 days ago)",
-    )
+    p.add_argument("--date", default=None, help="Date YYYY-MM-DD (default: 30 days ago)")
     args = p.parse_args()
 
     if args.date:
         test_date = date.fromisoformat(args.date)
     else:
-        # Default to 30 days ago — recent enough to have data, clearly historical
         test_date = date.today() - timedelta(days=30)
-        # Shift to Friday if it lands on a weekend
         while test_date.weekday() >= 5:
             test_date -= timedelta(days=1)
 

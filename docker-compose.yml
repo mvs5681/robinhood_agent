@@ -1,5 +1,6 @@
 services:
   agent:
+    image: ghcr.io/mvs5681/robinhood_agent:latest
     build: .
     ports:
       - "8080:8080"

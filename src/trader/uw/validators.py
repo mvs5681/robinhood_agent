@@ -33,12 +33,37 @@ class UWValidationError(Exception):
 
 def _unwrap(raw: Any) -> list[dict]:
     """Extract the list payload from MCP content format, {data:[...]}, or bare list."""
-    # MCP tools return [{'type': 'text', 'text': '<json>'}]
+    # MCP tools return content blocks: [{'type': 'text', 'text': <str|dict|list>}]
+    # Some adapters pre-parse 'text' into a Python object; others leave it as a JSON string.
+    # When there are multiple content blocks (large responses), merge their payloads.
     if isinstance(raw, list) and raw and isinstance(raw[0], dict) and "text" in raw[0]:
-        try:
-            raw = json.loads(raw[0]["text"])
-        except Exception:
-            pass
+        merged: list = []
+        any_parsed = False
+        for block in raw:
+            if not isinstance(block, dict):
+                continue
+            text_val = block.get("text")
+            if isinstance(text_val, str):
+                try:
+                    text_val = json.loads(text_val)
+                except Exception:
+                    continue  # skip unparseable blocks
+            # text_val is now a dict or list (pre-parsed or just decoded)
+            if isinstance(text_val, dict):
+                any_parsed = True
+                if "data" in text_val and isinstance(text_val["data"], list):
+                    merged.extend(text_val["data"])
+                elif "alert" in text_val:
+                    merged.append(text_val["alert"])
+                else:
+                    merged.append(text_val)
+            elif isinstance(text_val, list):
+                any_parsed = True
+                merged.extend(text_val)
+        if any_parsed:
+            return merged
+        # All blocks returned error text (e.g. "unsupported parameter") — treat as empty
+        return []
 
     if isinstance(raw, dict):
         if "data" in raw:
@@ -78,13 +103,19 @@ def parse_flow_alerts(raw: Any) -> list[FlowAlert]:
 def parse_spot_gex_by_strike(raw: Any) -> list[SpotGEXByStrike]:
     items = _unwrap(raw)
     result = []
-    for i, item in enumerate(items):
+    skipped = 0
+    for item in items:
+        # Try multiple field name variants used across different API versions
+        price = (item.get("price") or item.get("strike") or
+                 item.get("strike_price") or item.get("expiry_strike"))
+        if price is None:
+            skipped += 1
+            continue
         try:
-            # get_greek_exposure_by_strike uses call_gex/put_gex/strike field names
             normalised = {
-                "price":         item.get("price") or item.get("strike"),
-                "call_gamma_oi": item.get("call_gamma_oi") or item.get("call_gex") or 0,
-                "put_gamma_oi":  item.get("put_gamma_oi") or item.get("put_gex") or 0,
+                "price":          price,
+                "call_gamma_oi":  item.get("call_gamma_oi") or item.get("call_gex") or 0,
+                "put_gamma_oi":   item.get("put_gamma_oi") or item.get("put_gex") or 0,
                 "call_gamma_vol": item.get("call_gamma_vol"),
                 "put_gamma_vol":  item.get("put_gamma_vol"),
                 "call_delta_oi":  item.get("call_delta_oi") or item.get("call_delta"),
@@ -92,8 +123,11 @@ def parse_spot_gex_by_strike(raw: Any) -> list[SpotGEXByStrike]:
                 "time":           item.get("time") or item.get("date"),
             }
             result.append(SpotGEXByStrike.model_validate(normalised))
-        except ValidationError as e:
-            raise UWValidationError(f"SpotGEXByStrike[{i}] validation failed: {e}") from e
+        except ValidationError:
+            skipped += 1
+    if skipped:
+        import logging
+        logging.getLogger(__name__).debug("parse_spot_gex_by_strike: skipped %d unparseable rows", skipped)
     return result
 
 

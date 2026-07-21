@@ -40,6 +40,7 @@ from trader.executor.schemas import ExecutionMode
 from trader.exits.monitor import ExitMonitor
 from trader.live.approval_server import create_app
 from trader.live.cache import GEXCache
+from trader.live.capture_loop import CaptureLoop
 from trader.live.config import LiveConfig
 from trader.live.exit_loop import ExitLoop
 from trader.live.notifier import TelegramNotifier
@@ -48,6 +49,7 @@ from trader.live.position_store import PositionStore
 from trader.live.proposals import ProposalStore
 from trader.live.reconciler import reconcile_open_orders, reconcile_positions
 from trader.live.scanner import GEXScanner
+from trader.live.state_capture import StateCapture, StateCaptureLoop
 from trader.live.telemetry_reader import TelemetryReader
 from trader.live.watcher import FlowWatcher
 from trader.rh.mcp_config import load_rh_tools, refresh_rh_token
@@ -228,6 +230,18 @@ async def main() -> None:
         config=config,
     )
 
+    history_dir = os.environ.get("HISTORY_DIR", "data/history")
+    seed_tickers = [t.strip() for t in os.environ.get("TICKERS", "").split(",") if t.strip()]
+    state_capture = StateCapture(Path(history_dir))
+    state_capture_loop = StateCaptureLoop(cache=cache, capture=state_capture, seed_tickers=seed_tickers)
+    capture_loop = CaptureLoop(
+        uw_tools=uw_tools,
+        history_dir=history_dir,
+        seeds=seed_tickers,
+        min_premium=int(os.environ.get("DISCOVERY_MIN_PREMIUM", "250000")),
+        max_tickers=int(os.environ.get("MAX_DISCOVERED_TICKERS", "20")),
+    )
+
     watcher = FlowWatcher(
         uw_tools=uw_tools,
         cache=cache,
@@ -294,7 +308,7 @@ async def main() -> None:
     if notifier:
         await notifier.send_startup_check()
 
-    coroutines = [scanner.run(), watcher.run(), exit_loop.run()]
+    coroutines = [scanner.run(), watcher.run(), exit_loop.run(), capture_loop.run(), state_capture_loop.run()]
     if order_manager is not None:
         coroutines.append(order_manager.run())
     if notifier:

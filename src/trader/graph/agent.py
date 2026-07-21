@@ -543,6 +543,7 @@ def build_graph(
     rh_tools: list[BaseTool] | None = None,
     order_quantity: int = 1,
     telemetry: TelemetryLogger | None = None,
+    bypass_flow_gate: bool = False,
 ) -> Any:
     """
     Construct and compile the LangGraph StateGraph.
@@ -586,6 +587,9 @@ def build_graph(
         return score_candidates(state, scorer, tel)
 
     def _check_flow(state: TradingAgentState) -> dict[str, Any]:
+        if bypass_flow_gate:
+            logger.info("check_flow: bypassed — treating all proposed candidates as flow-confirmed")
+            return {"candidates": state.candidates}
         return check_flow(state, trigger, tel)
 
     def _select_contracts(state: TradingAgentState) -> dict[str, Any]:
@@ -649,11 +653,14 @@ async def run_pipeline(
     order_quantity: int = 1,
     pipeline_date: date | None = None,
     telemetry: TelemetryLogger | None = None,
+    bypass_flow_gate: bool = False,
 ) -> TradingAgentState:
     """Run the full graph for a given ticker list and return final state.
 
     pipeline_date: when set, the flow-trigger gate uses this date (at 16:00 UTC) as
     the as_of anchor instead of datetime.now(). Required for deterministic backtest replay.
+    bypass_flow_gate: when True, skip the FlowTrigger check and treat all proposed
+    candidates as flow-confirmed. Use in backtests where no flow alert data is available.
     telemetry: optional TelemetryLogger; if None, no structured events are emitted.
     """
     graph = build_graph(
@@ -671,6 +678,7 @@ async def run_pipeline(
         rh_tools=rh_tools,
         order_quantity=order_quantity,
         telemetry=telemetry,
+        bypass_flow_gate=bypass_flow_gate,
     )
     initial = TradingAgentState(tickers=tickers, pipeline_date=pipeline_date)
     result = await graph.ainvoke(initial)

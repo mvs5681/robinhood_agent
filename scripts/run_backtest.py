@@ -68,6 +68,15 @@ def _parse_args() -> argparse.Namespace:
         metavar="DIR",
         help="Directory to write CSV results (trades.csv, equity.csv, summary.csv)",
     )
+    p.add_argument(
+        "--bypass-flow-gate",
+        action="store_true",
+        default=False,
+        help=(
+            "Skip the FlowTrigger gate (Phase 4) and treat all GEX-scored candidates as "
+            "flow-confirmed. Use when backtesting with Polygon data, which has no flow alerts."
+        ),
+    )
     p.add_argument("--json", action="store_true", help="Print metrics as JSON")
     p.add_argument("-v", "--verbose", action="store_true", help="Enable debug logging")
     return p.parse_args()
@@ -270,7 +279,10 @@ def main() -> None:
     end = date.fromisoformat(args.end)
 
     store = DataStore(args.fixtures)
-    policy = StandardPolicy(min_composite_score=args.min_composite)
+    policy = StandardPolicy(
+        min_composite_score=args.min_composite,
+        bypass_flow_gate=args.bypass_flow_gate,
+    )
     harness = BacktestHarness(
         policy=policy,
         data_store=store,

@@ -79,6 +79,7 @@ class StandardPolicy(PolicyAdapter):
         sector_map: dict[str, str] | None = None,
         exit_monitor: ExitMonitor | None = None,
         min_composite_score: float = 0.0,
+        bypass_flow_gate: bool = False,
     ) -> None:
         self._detector_params = detector_params
         self._blend_weights = blend_weights
@@ -89,6 +90,7 @@ class StandardPolicy(PolicyAdapter):
         self._sector_map = sector_map
         self._exit_monitor = exit_monitor or ExitMonitor()
         self._min_composite = min_composite_score
+        self._bypass_flow_gate = bypass_flow_gate
 
     async def generate_and_score(
         self,
@@ -107,6 +109,7 @@ class StandardPolicy(PolicyAdapter):
             sector_map=self._sector_map,
             execution_mode=ExecutionMode.PROPOSE_ONLY,
             pipeline_date=data_slice.date,
+            bypass_flow_gate=self._bypass_flow_gate,
         )
         return state.candidates
 

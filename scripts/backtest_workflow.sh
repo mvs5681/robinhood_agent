@@ -98,13 +98,14 @@ run_period() {
 
     # shellcheck disable=SC2086
     "$PYTHON" scripts/run_backtest.py \
-        --fixtures      "$FIXTURES_DIR" \
-        --start         "$start" \
-        --end           "$end" \
-        --tickers       $TICKERS \
-        --capital       "$CAPITAL" \
-        --max-positions 3 \
-        --csv-out       "$RESULTS_DIR/$label"
+        --fixtures          "$FIXTURES_DIR" \
+        --start             "$start" \
+        --end               "$end" \
+        --tickers           $TICKERS \
+        --capital           "$CAPITAL" \
+        --max-positions     3 \
+        --bypass-flow-gate \
+        --csv-out           "$RESULTS_DIR/$label"
 
     echo ""
     echo "  ✓ $label complete — CSVs in $RESULTS_DIR/$label/"

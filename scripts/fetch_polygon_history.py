@@ -263,6 +263,7 @@ async def polygon_option_refs(session, underlying: str, exp_gte: date,
         "underlying_ticker": underlying,
         "expiration_date.gte": exp_gte.isoformat(),
         "expiration_date.lte": exp_lte.isoformat(),
+        "expired": "true",   # include contracts that have already expired (required for historical replay)
         "limit": 1000,
     }
     while True:
@@ -463,6 +464,18 @@ def _market_tide_row(contract_rows: list[dict], trade_date: date) -> list[dict]:
     }]
 
 
+def _spot_darkpool_entry(ticker: str, spot: float, trade_date: date) -> dict:
+    """Synthetic darkpool print that carries the EOD spot price into the DataStore."""
+    return {
+        "ticker": ticker,
+        "price": round(spot, 4),
+        "size": 1,
+        "premium": round(spot, 4),
+        "executed_at": f"{trade_date.isoformat()}T21:00:00+00:00",
+        "market_center": "POLYGON_PROXY",
+    }
+
+
 # ---------------------------------------------------------------------------
 # Per-ticker work for one day
 # ---------------------------------------------------------------------------
@@ -518,7 +531,8 @@ async def _process_ticker(
         json.dumps({"data": contract_rows}))
     (day_dir / f"{ticker}_net_prem_ticks.json").write_text(
         json.dumps({"data": _net_prem_rows(contract_rows, trade_date)}))
-    (day_dir / f"{ticker}_darkpool.json").write_text('{"data": []}')
+    (day_dir / f"{ticker}_darkpool.json").write_text(
+        json.dumps({"data": [_spot_darkpool_entry(ticker, spot, trade_date)]}))
     _write_technicals(day_dir, ticker, equity_ohlcv, trade_date)
 
     logger.info("%s %s: %d refs → %d contract rows (spot=%.2f VIX=%.1f%%)",

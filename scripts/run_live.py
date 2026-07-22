@@ -248,7 +248,7 @@ async def main() -> None:
         position_store=position_store,
         account_number=account_number,
         execution_mode=mode,
-        monitor=ExitMonitor(stop_loss_pct=config.stop_loss_pct, dte_floor=config.dte_floor),
+        monitor=ExitMonitor(stop_loss_pct=config.stop_loss_pct, dte_floor=config.dte_floor, wall_proximity_pct=config.wall_proximity_pct),
         tel=tel,
         notifier=notifier,
         risk_engine=risk_engine,

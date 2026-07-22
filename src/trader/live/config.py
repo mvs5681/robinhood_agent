@@ -47,6 +47,11 @@ _FIELDS: dict[str, tuple] = {
         lambda v: 0 <= v <= 30,
         "must be between 0 and 30",
     ),
+    "wall_proximity_pct": (
+        float,
+        lambda v: 0.005 <= v <= 0.10,
+        "must be between 0.005 (0.5%) and 0.10 (10%)",
+    ),
     "seed_tickers": (
         lambda v: [t.strip().upper() for t in (v.split(",") if isinstance(v, str) else v) if t.strip()],
         lambda v: len(v) <= 20 and all(_TICKER_RE.match(t) for t in v),
@@ -82,6 +87,7 @@ class LiveConfig:
     flow_min_premium: Decimal = Decimal("100000")
     stop_loss_pct: float = 0.35
     dte_floor: int = 7
+    wall_proximity_pct: float = 0.015
     seed_tickers: list[str] = field(default_factory=list)
     # Contract selector window — kept in sync with SelectorParams defaults
     selector_dte_min: int = 21
@@ -98,6 +104,7 @@ class LiveConfig:
             flow_min_premium=Decimal(os.environ.get("FLOW_MIN_PREMIUM", "100000")),
             stop_loss_pct=float(os.environ.get("STOP_LOSS_PCT", "0.35")),
             dte_floor=int(os.environ.get("DTE_FLOOR", "7")),
+            wall_proximity_pct=float(os.environ.get("WALL_PROXIMITY_PCT", "0.015")),
             seed_tickers=[t.strip().upper() for t in os.environ.get("TICKERS", "").split(",") if t.strip()],
             path=Path(path) if path else None,
         )
@@ -158,6 +165,7 @@ class LiveConfig:
             "flow_min_premium": str(self.flow_min_premium),
             "stop_loss_pct": self.stop_loss_pct,
             "dte_floor": self.dte_floor,
+            "wall_proximity_pct": self.wall_proximity_pct,
             "seed_tickers": self.seed_tickers,
             "selector_dte_min": self.selector_dte_min,
             "selector_dte_max": self.selector_dte_max,

@@ -1,5 +1,24 @@
 # Changelog
 
+## 2026-07-29 (fix autonomous-mode duplicate-signal dedup)
+
+- **Fix: autonomous mode had no duplicate-signal cooldown** — found live:
+  63 rejected order attempts across 5 tickers (SPY x35) in one afternoon,
+  all "not enough overnight buying power," with zero backoff. Root cause:
+  the sole dedup guard, `ProposalStore.has_recent(ticker)`, only reflects
+  tickers that had a `Proposal` added via `proposal_store.add()` —
+  `PROPOSE_ONLY`/`RH_APPROVAL` call that, so the guard worked for them, but
+  `AUTONOMOUS` mode dispatches straight to `executor.execute()` and never
+  touches `ProposalStore`, so `has_recent()` was always `False` there — a
+  no-op. Every new whale print re-attempted a doomed order against the same
+  wall, all day, on any ticker whose orders keep failing at the broker (an
+  open position never got created to trip the *other* guard either).
+  Replaced with `FlowWatcher._recent_attempts`, a mode-agnostic tracker
+  recorded the moment the watcher commits to dispatching a candidate
+  (before the mode branch), checked uniformly for all three modes with the
+  same 30-minute cooldown `ProposalStore` already used. Removed
+  `ProposalStore.has_recent()` (now fully superseded, no other callers).
+
 ## 2026-07-29 (trailing/give-back stop exit)
 
 - **New exit condition: trailing stop** — closes a gap thesis invalidation

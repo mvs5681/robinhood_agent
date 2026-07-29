@@ -48,30 +48,6 @@ class TestApproveSemantics:
         assert await store.approve("nope") is None
 
 
-class TestHasRecent:
-    async def test_true_for_fresh_proposal(self):
-        store = ProposalStore()
-        await store.add(_candidate("NVDA"))
-        assert await store.has_recent("NVDA") is True
-
-    async def test_false_for_other_ticker(self):
-        store = ProposalStore()
-        await store.add(_candidate("NVDA"))
-        assert await store.has_recent("SPY") is False
-
-    async def test_true_even_after_decision(self):
-        store = ProposalStore()
-        p = await store.add(_candidate("NVDA"))
-        await store.reject(p.proposal_id)
-        assert await store.has_recent("NVDA") is True
-
-    async def test_false_once_outside_ttl_window(self):
-        store = ProposalStore()
-        p = await store.add(_candidate("NVDA"))
-        p.created_at = datetime.now(timezone.utc) - timedelta(seconds=store.TTL_SECONDS + 1)
-        assert await store.has_recent("NVDA") is False
-
-
 class TestPrune:
     async def test_decided_proposals_pruned_after_retention(self):
         store = ProposalStore()

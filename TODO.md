@@ -51,3 +51,14 @@ avg P&L, and drawdown per regime/setup type. The harness works
       type). Consider also comparing wall distance/structure confidence
       drift from entry for earlier, more nuanced invalidation — would need
       Position to retain the entry-time GEXSetup snapshot.
+- [x] Fix autonomous-mode duplicate-signal dedup — `_recent_attempts` now
+      gates all three execution modes uniformly (was a no-op for autonomous,
+      63 repeated buying-power rejections in one afternoon).
+- [ ] The underlying "not enough overnight buying power" account condition
+      itself is still unresolved — the dedup fix stops the hammering, but
+      doesn't address why buying power is exhausted. Check margin/overnight
+      buying power directly in the Robinhood account.
+- [ ] Consider a longer, reason-specific cooldown for systemic/account-level
+      rejections (e.g. buying power) vs. the standard 30-min per-ticker
+      cooldown — a fresh whale print on a *different* ticker will still hit
+      the same account-wide wall immediately today.

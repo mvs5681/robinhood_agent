@@ -48,6 +48,10 @@ logger = logging.getLogger(__name__)
 _POLL_INTERVAL = 60     # seconds between flow alert polls
 _IDLE_SLEEP = 120       # seconds to sleep when market is closed
 
+# Matches ProposalStore.TTL_SECONDS — one live signal per ticker per window,
+# regardless of mode (see _recent_attempts).
+_ATTEMPT_COOLDOWN_SECONDS = 1800
+
 
 def _apply(state: TradingAgentState, updates: dict) -> TradingAgentState:
     return state.model_copy(update=updates)
@@ -104,6 +108,15 @@ class FlowWatcher:
         # dedup by (ticker, expiry, strike, type, created_at) — dict preserves
         # insertion order so trimming drops the oldest keys, not arbitrary ones
         self._seen: dict[str, None] = {}
+        # ticker → last-attempt time, mode-agnostic. ProposalStore.has_recent()
+        # alone isn't enough: PROPOSE_ONLY/RH_APPROVAL call proposal_store.add()
+        # so it works for them, but AUTONOMOUS dispatches straight to the
+        # executor and never touches ProposalStore, so has_recent() was always
+        # False there — every new whale print re-attempted a doomed order with
+        # no cooldown (63 rejections on 5 tickers in one afternoon, observed
+        # live). This tracks an attempt the moment we commit to dispatching,
+        # regardless of mode or outcome.
+        self._recent_attempts: dict[str, datetime] = {}
 
     async def run(self) -> None:
         logger.info("FlowWatcher started — mode=%s (tracks GEXScanner cache dynamically)", self.mode.value)
@@ -192,6 +205,24 @@ class FlowWatcher:
             self._seen = dict(list(self._seen.items())[-5_000:])
         return new
 
+    def _recently_attempted(self, ticker: str) -> bool:
+        last = self._recent_attempts.get(ticker)
+        if last is None:
+            return False
+        age = (datetime.now(timezone.utc) - last).total_seconds()
+        return age <= _ATTEMPT_COOLDOWN_SECONDS
+
+    def _record_attempt(self, ticker: str) -> None:
+        self._recent_attempts[ticker] = datetime.now(timezone.utc)
+        # Prune anything past the cooldown — this dict only ever holds
+        # currently-relevant tickers, so it can't grow unbounded.
+        if len(self._recent_attempts) > 200:
+            cutoff = datetime.now(timezone.utc)
+            self._recent_attempts = {
+                t: ts for t, ts in self._recent_attempts.items()
+                if (cutoff - ts).total_seconds() <= _ATTEMPT_COOLDOWN_SECONDS
+            }
+
     async def _run_pipeline(self, ticker: str, all_alerts: list[FlowAlert]) -> None:
         snap = await self.cache.snapshot(ticker)
         if snap is None or snap.gex_setup is None:
@@ -236,18 +267,21 @@ class FlowWatcher:
             logger.debug("%s: no proposed candidates after pipeline", ticker)
             return
 
-        # One live signal per ticker: skip if a proposal for this ticker is
-        # already within its TTL window (every new whale print re-runs the
-        # pipeline — without this, a hot ticker mints a duplicate proposal
-        # and Telegram ping per print) or if a position is already open.
-        if await self.proposal_store.has_recent(ticker):
-            logger.debug("%s: proposal already exists within TTL — skipping duplicate", ticker)
+        # One live signal per ticker, in every mode: skip if this ticker was
+        # attempted within the cooldown window (every new whale print re-runs
+        # the pipeline — without this, a hot ticker mints a duplicate
+        # proposal/order per print) or if a position is already open.
+        if self._recently_attempted(ticker):
+            logger.debug("%s: attempted within the last %ds — skipping duplicate",
+                        ticker, _ATTEMPT_COOLDOWN_SECONDS)
             return
         if self._position_store is not None and any(
             p.ticker == ticker for p in await self._position_store.all()
         ):
             logger.debug("%s: open position exists — skipping new entry", ticker)
             return
+
+        self._record_attempt(ticker)
 
         for candidate in proposed:
             if self.mode == ExecutionMode.PROPOSE_ONLY:

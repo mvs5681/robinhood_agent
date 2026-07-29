@@ -1,5 +1,27 @@
 # Changelog
 
+## 2026-07-29 (trailing/give-back stop exit)
+
+- **New exit condition: trailing stop** — closes a gap thesis invalidation
+  doesn't cover: a position (e.g. CRWV, bought 7/16 at $4.70) can gain real
+  profit and then decay back toward zero *without* the GEX regime ever
+  structurally flipping — thesis invalidation only fires on a regime/
+  direction change, so a position whose thesis stays technically intact but
+  whose price simply reverses would previously ride all the way down with no
+  protection (no profit-target touch, no stop-loss trip from *entry*).
+  `Position` now carries `peak_premium` — the highest premium observed since
+  entry, updated and persisted by `ExitLoop` every tick (a dip never lowers
+  it). `ExitReason.TRAILING_STOP` arms once `peak_premium` reaches
+  `entry * (1 + trailing_stop_activation_pct)` (default 30% gain), then
+  fires once the current premium has given back
+  `trailing_stop_giveback_pct` (default 50%) of the gain achieved at that
+  peak. Checked after profit-target and thesis-invalidation, before the
+  plain entry-based stop-loss. Both new percentages are dashboard-editable
+  (Settings tab) via `LiveConfig`, synced into `ExitMonitor` each tick like
+  the other exit dials. Also exposed `wall_proximity_pct` in the Settings
+  tab — it was added to `LiveConfig` in the earlier proximity-exit change
+  but never wired into the dashboard form.
+
 ## 2026-07-22 (restart-awareness + thesis-invalidation exit)
 
 - **Fix restart-awareness gap in order adoption** — `OrderLifecycleManager

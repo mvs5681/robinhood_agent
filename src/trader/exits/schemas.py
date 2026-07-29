@@ -12,6 +12,7 @@ from trader.uw.schemas import OptionContract
 class ExitReason(str, Enum):
     PROFIT_TARGET = "profit_target"
     THESIS_INVALIDATED = "thesis_invalidated"
+    TRAILING_STOP = "trailing_stop"
     STOP_LOSS = "stop_loss"
     DTE_STOP = "dte_stop"
     MANUAL = "manual"
@@ -29,6 +30,8 @@ class Position(BaseModel):
     quantity: int = 1
     option_instrument_id: str | None = None   # cached RH instrument UUID
     sector: str | None = None
+    peak_premium: Decimal | None = None  # highest premium observed since entry — updated
+                                         # by ExitLoop each tick, drives the trailing stop
 
 
 class ExitSignal(BaseModel):

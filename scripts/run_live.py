@@ -47,7 +47,7 @@ from trader.live.notifier import TelegramNotifier
 from trader.live.order_manager import OrderLifecycleManager
 from trader.live.position_store import PositionStore
 from trader.live.proposals import ProposalStore
-from trader.live.reconciler import reconcile_open_orders, reconcile_positions
+from trader.live.reconciler import reconcile_positions
 from trader.live.scanner import GEXScanner
 from trader.live.state_capture import StateCapture, StateCaptureLoop
 from trader.live.telemetry_reader import TelemetryReader
@@ -267,6 +267,7 @@ async def main() -> None:
         notifier=notifier,
         risk_engine=risk_engine,
         config=config,
+        cache=cache,
     )
 
     dashboard_token = os.environ.get("DASHBOARD_TOKEN", "")
@@ -289,17 +290,15 @@ async def main() -> None:
     await site.start()
     logger.info("Approval server listening on :%d", port)
 
-    # Reconcile any open positions from before this container started
+    # Reconcile any open (filled) positions from before this container started
     if mode != ExecutionMode.PROPOSE_ONLY and account_number and rh_tools:
         await reconcile_positions(rh_tools, position_store, account_number)
 
-    # Reconcile pending agentic orders (queued/confirmed but not yet filled)
-    # so the exit loop monitors them once they fill.
-    if mode != ExecutionMode.PROPOSE_ONLY and rh_tools:
-        await reconcile_open_orders(rh_tools, position_store)
-
-    # Adopt agentic orders still working from before the restart, so a fill
-    # after the restart still becomes a monitored position
+    # Adopt agentic orders still working (queued/confirmed/partially_filled/
+    # pending_cancelled) from before the restart, so a fill after the restart
+    # still becomes a monitored position — this is the sole order-in-flight
+    # reconciliation path; it promotes partial fills to a protected Position
+    # immediately rather than waiting for the order to fully resolve.
     if order_manager is not None and account_number:
         await order_manager.adopt_working_orders()
 

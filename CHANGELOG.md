@@ -1,5 +1,40 @@
 # Changelog
 
+## 2026-07-22 (restart-awareness + thesis-invalidation exit)
+
+- **Fix restart-awareness gap in order adoption** — `OrderLifecycleManager
+  .adopt_working_orders()` only swept `confirmed`/`queued` order states at
+  startup. Per the live `get_option_orders` schema, `partially_filled` and
+  `pending_cancelled` are also non-terminal — an order restarted mid-fill or
+  mid-cancel was completely invisible to the agent, meaning contracts that
+  already cost real money sat unmonitored (no stop-loss, no DTE floor) until
+  the order eventually resolved on its own. Now sweeps all four states, and
+  a partially-filled order is split at adoption: the already-filled quantity
+  is immediately promoted to a protected `Position` (using the true average
+  fill premium), while the remaining unfilled quantity continues as a
+  working order. An adopted `pending_cancelled` order is marked
+  cancelling+giving_up so it isn't blindly re-chased into a cancel someone
+  else already initiated.
+- **Remove `reconciler.reconcile_open_orders()`** — this parallel
+  reconciliation path (added alongside the order lifecycle manager) used the
+  wrong MCP parameter (`placed_by_agent: true` instead of the schema's
+  `placed_agent: "agentic"`), so it silently no-op'd on every restart. Worse,
+  had it worked, it promoted *unfilled* orders directly to full-quantity
+  `Position` objects — meaning the exit loop would evaluate stop-loss/DTE
+  against contracts that were never actually bought. Fully superseded by the
+  fix above; removed rather than patched.
+- **New exit condition: thesis invalidation** — the exit loop previously only
+  reacted to price and DTE. `ExitReason.THESIS_INVALIDATED` fires when the
+  ticker's *live* GEX setup no longer supports the direction the position
+  was bought for (regime went mixed, or flipped to the opposite side) —
+  checked after profit-target but before the price-based stop-loss, so a
+  soured setup exits before the position has to fully round-trip through the
+  stop-loss threshold. `ExitLoop` now takes the shared `GEXCache` and looks
+  up the current `GEXSetup` per position each tick (skipped if the cached
+  setup is stale — no fresh read, no action). `ExitMonitor.evaluate()` takes
+  the live setup as a plain, optional argument; fully backward compatible
+  when omitted.
+
 ## 2026-07-15 13:05 EDT
 
 - **Round limit prices onto the instrument's tick grid** — the approved TQQQ

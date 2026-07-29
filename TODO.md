@@ -21,18 +21,33 @@ avg P&L, and drawdown per regime/setup type. The harness works
 
 ## Later / nice to have
 
-- [ ] Reconcile working (unfilled) orders at startup — reconciliation only
-      pulls open positions, so an order placed pre-restart that fills
-      post-restart is unmonitored until the *next* restart. Poll
-      `get_option_orders` (state=confirmed/queued, placed_agent=agentic) at
-      startup and either track them for fill-to-position promotion or cancel
-      them.
-- [ ] Expose the contract selector window (DTE min/max, delta min/max) in the
+- [x] Reconcile working (unfilled/partially-filled) orders at startup —
+      `OrderLifecycleManager.adopt_working_orders()` now sweeps every
+      non-terminal order state (queued/confirmed/partially_filled/
+      pending_cancelled) and splits partial fills into an immediately
+      protected `Position` + a continued working order for the remainder.
+- [x] Expose the contract selector window (DTE min/max, delta min/max) in the
       dashboard Settings tab
-- [ ] Extend `NYSE_HOLIDAYS` in `market_hours.py` before 2028
-- [ ] Update README pipeline description to match code (selector window is
+- [x] Extend `NYSE_HOLIDAYS` in `market_hours.py` before 2028
+- [x] Update README pipeline description to match code (selector window is
       DTE 21–30, delta 0.30–0.45 — README says 7–45 / 0.30–0.55)
-- [ ] Persist ProposalStore / RiskEngine daily P&L across restarts (kill-switch
-      state currently resets when the container restarts)
-- [ ] Sector map for the risk engine's sector-concentration gate (currently
-      no map is wired, so the gate is inactive)
+- [x] Persist RiskEngine daily P&L / kill-switch across restarts
+      (`logs/risk_state.json`, resets at midnight UTC)
+- [ ] Persist `ProposalStore` across restarts — lower priority than the
+      RiskEngine state above since pending proposals expire after 30 min
+      anyway; only matters for exact continuity of in-flight approvals
+      across a restart.
+- [x] Sector map wiring for the risk engine's sector-concentration gate is
+      code-complete (`SECTOR_MAP_FILE` env var, `sector_map.example.json`) —
+      still needs a real `sector_map.json` populated and deployed for the
+      gate to actually activate; currently inactive with no map on disk.
+- [ ] Fix test isolation in `test_risk_engine.py` — `RiskEngine` persists to
+      `logs/risk_state.json` by default (real path, not a temp dir), so
+      running the suite locally leaves real state on disk that leaks across
+      runs/dates and causes ~10 kill-switch/sector tests to fail
+      intermittently. Tests should pass an explicit `tmp_path` state file.
+- [ ] Exit loop currently checks thesis invalidation via a simple
+      direction-flip rule (live `candidate_direction` vs. the held contract's
+      type). Consider also comparing wall distance/structure confidence
+      drift from entry for earlier, more nuanced invalidation — would need
+      Position to retain the entry-time GEXSetup snapshot.

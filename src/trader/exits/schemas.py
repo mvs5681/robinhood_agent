@@ -11,6 +11,7 @@ from trader.uw.schemas import OptionContract
 
 class ExitReason(str, Enum):
     PROFIT_TARGET = "profit_target"
+    THESIS_INVALIDATED = "thesis_invalidated"
     STOP_LOSS = "stop_loss"
     DTE_STOP = "dte_stop"
     MANUAL = "manual"

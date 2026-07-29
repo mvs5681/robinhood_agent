@@ -38,6 +38,7 @@ from .market_hours import is_market_hours, seconds_until_market_open
 
 if TYPE_CHECKING:
     from .config import LiveConfig
+    from .position_store import PositionStore
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +53,9 @@ class GEXScanner:
     Runs hourly during market hours. Each cycle:
       1. Calls get_flow_alerts to discover which tickers have significant
          premium volume — no static watchlist needed.
-      2. Merges with any seed_tickers that should always be scanned.
+      2. Merges with any seed_tickers that should always be scanned, plus
+         any ticker with a currently open position (see position_store) —
+         both exempt from the discovery premium threshold and ticker cap.
       3. Fetches slow-moving data per ticker and runs GEX detection.
       4. Writes results into the shared GEXCache.
     """
@@ -69,6 +72,7 @@ class GEXScanner:
         scan_interval: int = _SCAN_INTERVAL,
         config: "LiveConfig | None" = None,
         selector_params: SelectorParams | None = None,
+        position_store: "PositionStore | None" = None,
     ) -> None:
         self._seed_tickers = list(seed_tickers or [])
         self.uw_tools = uw_tools
@@ -79,6 +83,7 @@ class GEXScanner:
         self.tel = tel
         self.scan_interval = scan_interval
         self._config = config
+        self._position_store = position_store
         # Must match the ContractSelector's window so the fetched contracts
         # are the ones the selector will actually consider
         self._selector_params = selector_params or SelectorParams()
@@ -116,6 +121,32 @@ class GEXScanner:
             except Exception as exc:
                 logger.error("GEX scan failed: %s — retry in %d s", exc, _RETRY_INTERVAL)
                 await asyncio.sleep(_RETRY_INTERVAL)
+
+    async def _held_tickers(self) -> list[str]:
+        """Tickers with a currently open position — always scanned regardless
+        of current flow activity.
+
+        Discovery is driven by *current* flow-alert volume, so a ticker that
+        stops trending falls out of the scanned universe and its GEXCache
+        entry goes stale — silently disabling thesis-invalidation/trailing-
+        stop checks for a position you're still holding. Forcing held
+        tickers into every cycle (like seed_tickers) keeps their snapshot
+        fresh for as long as the position stays open.
+        """
+        if self._position_store is None:
+            return []
+        try:
+            positions = await self._position_store.all()
+        except Exception as exc:
+            logger.error("held-ticker lookup failed: %s", exc)
+            return []
+        seen: set[str] = set()
+        out: list[str] = []
+        for pos in positions:
+            if pos.ticker not in seen:
+                seen.add(pos.ticker)
+                out.append(pos.ticker)
+        return out
 
     async def _discover_tickers(self) -> tuple[list[str], dict[str, Decimal]]:
         """
@@ -156,7 +187,8 @@ class GEXScanner:
                     alerts.append(a)
         if failures == len(slices):
             logger.error("ticker discovery via get_flow_alerts failed: all slices errored")
-            return self.seed_tickers[:], {}
+            held = await self._held_tickers()
+            return self._dedup(self.seed_tickers, held), {}
 
         premium_by_ticker: dict[str, Decimal] = defaultdict(Decimal)
         spot_hints: dict[str, Decimal] = {}
@@ -181,14 +213,22 @@ class GEXScanner:
             self.tel.uw_fetch(endpoint="get_flow_alerts (discovery)",
                               record_count=len(alerts), duration_ms=ms)
 
-        # Seed tickers always first, then discovered (dedup preserving order)
-        seen: set[str] = set()
-        combined: list[str] = []
-        for t in self.seed_tickers + discovered:
-            if t not in seen:
-                seen.add(t)
-                combined.append(t)
+        # Seed tickers and held positions always first, then discovered
+        # (dedup preserving order) — both exempt from the threshold/cap above
+        held = await self._held_tickers()
+        combined = self._dedup(self.seed_tickers, held, discovered)
         return combined, spot_hints
+
+    @staticmethod
+    def _dedup(*ticker_lists: list[str]) -> list[str]:
+        seen: set[str] = set()
+        out: list[str] = []
+        for tickers in ticker_lists:
+            for t in tickers:
+                if t not in seen:
+                    seen.add(t)
+                    out.append(t)
+        return out
 
     async def _scan(self) -> None:
         t_start = _time.monotonic()

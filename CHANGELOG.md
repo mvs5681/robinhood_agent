@@ -19,6 +19,25 @@
   same 30-minute cooldown `ProposalStore` already used. Removed
   `ProposalStore.has_recent()` (now fully superseded, no other callers).
 
+## 2026-07-29 (keep held positions in the discovery universe)
+
+- **Fix: thesis-invalidation/trailing-stop silently going stale for a held
+  position** — found live: CRWV's GEX regime had been `mixed/none` for 9+
+  days (since 7/20), which should trigger `THESIS_INVALIDATED` immediately,
+  but the exit hadn't fired. Root cause: `ExitLoop` only acts on
+  `GEXCache`, and the scanner's per-cycle universe is driven purely by
+  *current* flow-alert volume — once CRWV stopped trending, it fell out of
+  discovery entirely, its cache entry aged past the 65-minute staleness
+  threshold, and `_current_gex_setup()` correctly (per its own logic)
+  returned `None` rather than act on stale data. Net effect: a position
+  can lose thesis/trailing-stop protection simply by going quiet, with no
+  error or log line calling it out.
+  `GEXScanner` now takes an optional `position_store` and force-includes
+  every ticker with an open position in each scan cycle — the same
+  treatment `seed_tickers` already get (exempt from the discovery premium
+  threshold and ticker cap), including the all-slices-failed fallback path.
+  Wired in `run_live.py`.
+
 ## 2026-07-29 (trailing/give-back stop exit)
 
 - **New exit condition: trailing stop** — closes a gap thesis invalidation

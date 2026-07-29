@@ -103,6 +103,66 @@ class TestCurrentGexSetup:
         assert await loop._current_gex_setup("AAPL") is None
 
 
+def _sequential_quote_tool(marks: list[str]) -> MagicMock:
+    t = MagicMock()
+    t.ainvoke = AsyncMock(side_effect=[
+        {"data": {"results": [{"quote": {"mark_price": m}}]}} for m in marks
+    ])
+    return t
+
+
+def _equity_quote_tool(price: str = "195") -> MagicMock:
+    t = MagicMock()
+    t.ainvoke = AsyncMock(return_value={"data": {"results": [
+        {"quote": {"symbol": "AAPL", "last_trade_price": price}}
+    ]}})
+    return t
+
+
+class TestPeakPremiumTracking:
+    async def test_peak_persists_and_only_moves_upward_across_ticks(self):
+        store = PositionStore()
+        pos = _position()  # entry 3.00, target 250 (far from spot — no profit exit)
+        await store.add(pos)
+
+        # Dip to 3.80 stays above this peak's giveback floor (3.50) so it
+        # doesn't itself trigger a trailing-stop exit — isolates peak
+        # persistence from the exit condition (covered separately below).
+        rh_tools = {
+            "get_option_quotes": _sequential_quote_tool(["4.00", "3.80", "5.00"]),
+            "get_equity_quotes": _equity_quote_tool(),
+        }
+        loop = _loop(cache=None, rh_tools=rh_tools, store=store)
+
+        await loop._tick()
+        assert (await store.get(pos.position_id)).peak_premium == Decimal("4.00")
+
+        await loop._tick()  # dip — peak must not move down
+        assert (await store.get(pos.position_id)).peak_premium == Decimal("4.00")
+
+        await loop._tick()  # new high
+        assert (await store.get(pos.position_id)).peak_premium == Decimal("5.00")
+
+    async def test_trailing_stop_exits_after_giveback_from_peak(self):
+        store = PositionStore()
+        pos = _position()  # entry 3.00
+        await store.add(pos)
+
+        # default monitor: activation 0.30 → threshold 3.90; giveback 0.50
+        # peak 6.00 → gain_at_peak 3.00 → floor = 3.00 + 3.00*0.50 = 4.50
+        rh_tools = {
+            "get_option_quotes": _sequential_quote_tool(["6.00", "4.40"]),
+            "get_equity_quotes": _equity_quote_tool(),
+        }
+        loop = _loop(cache=None, rh_tools=rh_tools, store=store)
+
+        await loop._tick()  # establishes the peak, no exit yet
+        assert len(await store.all()) == 1
+
+        await loop._tick()  # gives back below the floor — trailing stop fires
+        assert await store.all() == []
+
+
 class TestEvaluateWithThesisInvalidation:
     async def test_exit_triggered_when_live_direction_flips(self):
         store = PositionStore()

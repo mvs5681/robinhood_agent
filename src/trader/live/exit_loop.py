@@ -29,6 +29,7 @@ from .market_hours import is_market_hours
 
 if TYPE_CHECKING:
     from langchain_core.tools import BaseTool
+    from trader.live.cache import GEXCache
     from trader.live.config import LiveConfig
     from trader.live.notifier import TelegramNotifier
     from trader.live.position_store import PositionStore
@@ -81,6 +82,7 @@ class ExitLoop:
         poll_interval: int = _POLL_INTERVAL,
         risk_engine: "RiskEngine | None" = None,
         config: "LiveConfig | None" = None,
+        cache: "GEXCache | None" = None,
     ) -> None:
         self._rh_tools = rh_tools
         self._store = position_store
@@ -92,6 +94,7 @@ class ExitLoop:
         self._poll_interval = poll_interval
         self._risk_engine = risk_engine
         self._config = config
+        self._cache = cache
 
     async def run(self) -> None:
         logger.info(
@@ -144,13 +147,29 @@ class ExitLoop:
             logger.debug("ExitLoop: no option quote for %s", pos.ticker)
             return
 
-        signal = self._monitor.evaluate(pos, spot, premium, dte)
+        current_setup = await self._current_gex_setup(pos.ticker)
+        signal = self._monitor.evaluate(pos, spot, premium, dte, current_setup=current_setup)
         if signal:
+            extra = ""
+            if signal.reason == ExitReason.THESIS_INVALIDATED and current_setup is not None:
+                extra = (f" live_regime={current_setup.regime.value} "
+                        f"live_direction={current_setup.candidate_direction}")
             logger.info(
-                "Exit triggered %s reason=%s pnl=%.1f%% spot=%s premium=%s dte=%d",
-                pos.ticker, signal.reason.value, signal.pnl_pct * 100, spot, premium, dte,
+                "Exit triggered %s reason=%s pnl=%.1f%% spot=%s premium=%s dte=%d%s",
+                pos.ticker, signal.reason.value, signal.pnl_pct * 100, spot, premium, dte, extra,
             )
             await self._execute_exit(pos, signal)
+
+    async def _current_gex_setup(self, ticker: str):
+        """Live GEXSetup for thesis-invalidation checks, or None if unavailable
+        or stale (a stale setup means we don't actually know the current
+        thesis status, so we shouldn't act on it)."""
+        if self._cache is None:
+            return None
+        snap = await self._cache.snapshot(ticker)
+        if snap is None or snap.is_stale:
+            return None
+        return snap.gex_setup
 
     # ------------------------------------------------------------------
     # Order placement

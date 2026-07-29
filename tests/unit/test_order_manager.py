@@ -78,6 +78,16 @@ def _tool(response) -> MagicMock:
     return t
 
 
+def _tool_by_state(orders_by_state: dict) -> MagicMock:
+    """get_option_orders mock that returns a different fixture per state=
+    param, and an empty result for any state not in the map."""
+    async def _invoke(kwargs):
+        return orders_by_state.get(kwargs.get("state"), {"data": {"orders": []}})
+    t = MagicMock()
+    t.ainvoke = AsyncMock(side_effect=_invoke)
+    return t
+
+
 def _manager(rh: dict, store: PositionStore | None = None) -> OrderLifecycleManager:
     return OrderLifecycleManager(
         rh_tools=rh,
@@ -255,3 +265,78 @@ class TestAdoption:
         rh = {"get_option_orders": _tool(order)}
         mgr = _manager(rh)
         assert await mgr.adopt_working_orders() == 0
+
+    async def test_sweeps_all_four_adoptable_states(self):
+        # A different order per state — proves the sweep actually queries
+        # partially_filled and pending_cancelled, not just confirmed/queued
+        # (missing those left contracts that already cost real money
+        # completely unmonitored after a restart).
+        rh = {"get_option_orders": _tool_by_state({
+            "queued": _order("queued", order_id="o-queued"),
+            "confirmed": _order("confirmed", order_id="o-confirmed"),
+            "partially_filled": _order("partially_filled", order_id="o-partial",
+                                       processed="0.00000"),
+            "pending_cancelled": _order("pending_cancelled", order_id="o-pending-cancel"),
+        })}
+        mgr = _manager(rh)
+        adopted = await mgr.adopt_working_orders()
+        assert adopted == 4
+        assert {"o-queued", "o-confirmed", "o-partial", "o-pending-cancel"} == set(mgr._orders)
+
+    async def test_partial_fill_adopted_as_immediate_position_plus_remainder(self):
+        store = PositionStore()
+        rh = {"get_option_orders": _tool_by_state({
+            "partially_filled": _order(
+                "partially_filled", order_id="o-partial",
+                quantity="3.00000", processed="1.00000", processed_premium="415.00",
+            ),
+        })}
+        mgr = _manager(rh, store)
+        adopted = await mgr.adopt_working_orders()
+        assert adopted == 1
+
+        # filled contract is protected immediately, not left for later
+        positions = await store.all()
+        assert len(positions) == 1
+        assert positions[0].quantity == 1
+        assert positions[0].entry_premium == Decimal("4.1500")
+
+        # remaining 2 contracts still being chased as a working order
+        assert mgr.working_count == 1
+        wo = next(iter(mgr._orders.values()))
+        assert wo.quantity == 2
+        assert wo.cancelling is False
+
+    async def test_fully_processed_partial_fill_tracks_no_working_order(self):
+        # processed == quantity: nothing left pending, only the Position matters
+        store = PositionStore()
+        rh = {"get_option_orders": _tool_by_state({
+            "partially_filled": _order(
+                "partially_filled", order_id="o-done",
+                quantity="1.00000", processed="1.00000", processed_premium="420.00",
+            ),
+        })}
+        mgr = _manager(rh, store)
+        await mgr.adopt_working_orders()
+        assert len(await store.all()) == 1
+        assert mgr.working_count == 0
+
+    async def test_pending_cancelled_adopted_without_chasing_a_replacement(self):
+        rh = {"get_option_orders": _tool_by_state({
+            "pending_cancelled": _order("pending_cancelled", order_id="o-cancel"),
+        })}
+        mgr = _manager(rh)
+        await mgr.adopt_working_orders()
+        wo = mgr._orders["o-cancel"]
+        assert wo.cancelling is True
+        assert wo.giving_up is True
+
+    async def test_adoption_is_idempotent_across_repeated_state_queries(self):
+        # Regression against the old 2-state sweep's dedup: the same order
+        # id must not be double-counted even though every state query in
+        # this fixture returns it.
+        rh = {"get_option_orders": _tool(_order("confirmed"))}
+        mgr = _manager(rh)
+        adopted = await mgr.adopt_working_orders()
+        assert adopted == 1
+        assert mgr.working_count == 1

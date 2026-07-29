@@ -7,6 +7,7 @@ import pytest
 
 from trader.exits.monitor import ExitMonitor
 from trader.exits.schemas import ExitReason, Position
+from trader.gex.schemas import GEXRegime, GEXSetup
 from trader.uw.schemas import OptionContract
 
 
@@ -38,6 +39,16 @@ def _position(
         entry_premium=Decimal(entry_premium),
         target_level=Decimal(target_level),
         opened_at=datetime(2026, 6, 28, 10, 0, tzinfo=timezone.utc),
+    )
+
+
+def _setup(direction: str = "call", regime: GEXRegime = GEXRegime.NEGATIVE) -> GEXSetup:
+    return GEXSetup(
+        ticker="AAPL", as_of=AS_OF, spot_price=Decimal("195"), regime=regime,
+        flip_point=None, nearest_call_wall=None, nearest_put_wall=None,
+        target_level=Decimal("200"), candidate_direction=direction,
+        setup_type="momentum" if direction != "none" else "none",
+        structure_confidence=0.6, raw_gex_by_strike=[],
     )
 
 
@@ -92,9 +103,11 @@ class TestProfitTarget:
         assert result.reason == ExitReason.PROFIT_TARGET
 
     def test_does_not_fire_below_target(self):
+        # Below both the exact target and the 1.5% wall-proximity band
+        # (threshold is 200 * (1 - 0.015) = 197.0)
         pos = _position(target_level="200")
         result = DEFAULT_MONITOR.evaluate(
-            pos, current_price=Decimal("199.99"), current_premium=Decimal("4.80"), dte=14, as_of=AS_OF
+            pos, current_price=Decimal("196.99"), current_premium=Decimal("4.80"), dte=14, as_of=AS_OF
         )
         assert result is None
 
@@ -214,6 +227,64 @@ class TestDTEStop:
 # ---------------------------------------------------------------------------
 # Priority ordering
 # ---------------------------------------------------------------------------
+
+
+class TestThesisInvalidation:
+    def test_fires_when_regime_goes_mixed(self):
+        # position holds a call; live setup now shows no structure at all
+        pos = _position(target_level="200", entry_premium="3.00")
+        result = DEFAULT_MONITOR.evaluate(
+            pos, current_price=Decimal("195"), current_premium=Decimal("3.10"),
+            dte=14, as_of=AS_OF, current_setup=_setup(direction="none", regime=GEXRegime.MIXED),
+        )
+        assert result is not None
+        assert result.reason == ExitReason.THESIS_INVALIDATED
+
+    def test_fires_when_direction_flips(self):
+        # bought a call; live setup now favors puts
+        pos = _position(target_level="200", entry_premium="3.00")
+        result = DEFAULT_MONITOR.evaluate(
+            pos, current_price=Decimal("195"), current_premium=Decimal("3.10"),
+            dte=14, as_of=AS_OF, current_setup=_setup(direction="put"),
+        )
+        assert result is not None
+        assert result.reason == ExitReason.THESIS_INVALIDATED
+
+    def test_does_not_fire_when_direction_still_matches(self):
+        pos = _position(target_level="200", entry_premium="3.00")
+        result = DEFAULT_MONITOR.evaluate(
+            pos, current_price=Decimal("195"), current_premium=Decimal("3.10"),
+            dte=14, as_of=AS_OF, current_setup=_setup(direction="call"),
+        )
+        assert result is None
+
+    def test_no_setup_provided_never_fires(self):
+        # back-compat: omitting current_setup must not change existing behavior
+        pos = _position(target_level="200", entry_premium="3.00")
+        result = DEFAULT_MONITOR.evaluate(
+            pos, current_price=Decimal("195"), current_premium=Decimal("3.10"),
+            dte=14, as_of=AS_OF,
+        )
+        assert result is None
+
+    def test_profit_target_takes_priority_over_thesis_invalidated(self):
+        # price already at the wall — take the win even if the setup soured
+        pos = _position(target_level="200", entry_premium="3.00")
+        result = DEFAULT_MONITOR.evaluate(
+            pos, current_price=Decimal("200"), current_premium=Decimal("5.00"),
+            dte=14, as_of=AS_OF, current_setup=_setup(direction="none", regime=GEXRegime.MIXED),
+        )
+        assert result.reason == ExitReason.PROFIT_TARGET
+
+    def test_thesis_invalidated_takes_priority_over_stop_loss(self):
+        # setup soured AND price already crashed past stop-loss — thesis wins
+        # since it's evaluated first (checked in priority order)
+        pos = _position(target_level="200", entry_premium="3.00")
+        result = DEFAULT_MONITOR.evaluate(
+            pos, current_price=Decimal("195"), current_premium=Decimal("1.50"),  # -50%
+            dte=14, as_of=AS_OF, current_setup=_setup(direction="none", regime=GEXRegime.MIXED),
+        )
+        assert result.reason == ExitReason.THESIS_INVALIDATED
 
 
 class TestPriority:

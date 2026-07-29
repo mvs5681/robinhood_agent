@@ -2,8 +2,12 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from decimal import Decimal
+from typing import TYPE_CHECKING
 
 from .schemas import ExitReason, ExitSignal, Position
+
+if TYPE_CHECKING:
+    from trader.gex.schemas import GEXSetup
 
 
 class ExitMonitor:
@@ -12,16 +16,21 @@ class ExitMonitor:
     if any exit condition is triggered.
 
     Priority order (first match wins):
-      1. Profit target — underlying price within wall_proximity_pct of the GEX gamma wall
-      2. Stop loss     — option premium dropped ≥ stop_loss_pct from entry
-      3. DTE stop      — dte_remaining ≤ dte_floor (avoid final-week decay)
+      1. Profit target      — underlying price within wall_proximity_pct of the GEX gamma wall
+      2. Thesis invalidated — the live GEX setup no longer supports the direction
+                               this position was bought for (regime flipped or
+                               went mixed) — exits before price-based stop-loss
+                               would otherwise have to absorb the full decay
+      3. Stop loss           — option premium dropped ≥ stop_loss_pct from entry
+      4. DTE stop             — dte_remaining ≤ dte_floor (avoid final-week decay)
 
     wall_proximity_pct: how close spot must get to the gamma wall to trigger profit
     exit. Default 1.5% — avoids requiring an exact wall touch, which rarely happens.
     Direction-aware: calls exit when spot ≥ wall × (1 - pct); puts exit when
     spot ≤ wall × (1 + pct).
 
-    Fully synchronous; no I/O.
+    Fully synchronous; no I/O. Thesis invalidation takes the current GEXSetup
+    as a plain argument — any cache/API lookup happens in the caller.
     """
 
     def __init__(
@@ -41,8 +50,9 @@ class ExitMonitor:
         current_premium: Decimal,  # current option mid (per share)
         dte: int,
         as_of: datetime | None = None,
+        current_setup: "GEXSetup | None" = None,
     ) -> ExitSignal | None:
-        reason = self._first_triggered(position, current_price, current_premium, dte)
+        reason = self._first_triggered(position, current_price, current_premium, dte, current_setup)
         if reason is None:
             return None
 
@@ -72,6 +82,7 @@ class ExitMonitor:
         current_price: Decimal,
         current_premium: Decimal,
         dte: int,
+        current_setup: "GEXSetup | None" = None,
     ) -> ExitReason | None:
         if position.target_level is not None:
             target = position.target_level
@@ -80,6 +91,13 @@ class ExitMonitor:
                 return ExitReason.PROFIT_TARGET
             if not is_call and current_price <= target * (1 + self.wall_proximity_pct):
                 return ExitReason.PROFIT_TARGET
+
+        # The setup this position was bought for is gone: regime went mixed
+        # (candidate_direction "none") or flipped to the opposite side of
+        # what we're holding. Either way the original reason to hold no
+        # longer applies — exit before a price-based stop has to catch it.
+        if current_setup is not None and current_setup.candidate_direction != position.contract.type:
+            return ExitReason.THESIS_INVALIDATED
 
         pnl_ratio = (current_premium - position.entry_premium) / position.entry_premium
         if pnl_ratio <= -Decimal(str(self.stop_loss_pct)):

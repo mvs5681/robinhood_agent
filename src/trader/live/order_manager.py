@@ -106,6 +106,27 @@ def _list_orders(result: object) -> list[dict]:
     return []
 
 
+def _remaining_quantity(order: dict) -> int:
+    """Contracts still unfilled on this order.
+
+    Prefers pending_quantity when present; otherwise derives it from
+    quantity - processed_quantity - canceled_quantity.
+    """
+    pending = order.get("pending_quantity")
+    if pending is not None:
+        try:
+            return max(int(Decimal(str(pending))), 0)
+        except Exception:
+            pass
+    try:
+        total = Decimal(str(order.get("quantity", "0")))
+        processed = Decimal(str(order.get("processed_quantity", "0")))
+        canceled = Decimal(str(order.get("canceled_quantity", "0")))
+        return max(int(total - processed - canceled), 0)
+    except Exception:
+        return 0
+
+
 def _parse_quote(result: object) -> tuple[Decimal | None, Decimal | None, Decimal | None]:
     """Return (bid, ask, mark) from a get_option_quotes payload."""
     if not isinstance(result, dict):
@@ -184,10 +205,22 @@ class OrderLifecycleManager:
     # Startup adoption
     # ------------------------------------------------------------------
 
+    # Every order state that still needs following up on. Per the live
+    # get_option_orders schema: queued, confirmed, partially_filled, filled,
+    # rejected, cancelled, failed, voided, pending_cancelled — filled and the
+    # terminal states are excluded here since there's nothing left to adopt.
+    _ADOPTABLE_STATES = ("queued", "confirmed", "partially_filled", "pending_cancelled")
+
     async def adopt_working_orders(self) -> int:
-        """Pick up agentic buy orders still working from before a restart."""
+        """Pick up agentic buy orders still working from before a restart.
+
+        Sweeps every non-terminal order state — missing partially_filled or
+        pending_cancelled would leave contracts that already cost real money
+        completely unmonitored (no stop-loss/DTE/exit) until the order
+        eventually resolves on its own.
+        """
         adopted = 0
-        for state in ("confirmed", "queued"):
+        for state in self._ADOPTABLE_STATES:
             try:
                 result = await rh_call(self._rh_tools, "get_option_orders", {
                     "account_number": self._account_number,
@@ -198,21 +231,20 @@ class OrderLifecycleManager:
                 logger.error("adopt_working_orders(%s) failed: %s", state, exc)
                 continue
             for order in _list_orders(result):
-                wo = self._adopt_one(order)
-                if wo is not None:
+                if await self._adopt_one(order, state):
                     adopted += 1
         if adopted:
             logger.warning("Adopted %d working order(s) from before restart", adopted)
         return adopted
 
-    def _adopt_one(self, order: dict) -> WorkingOrder | None:
+    async def _adopt_one(self, order: dict, state: str) -> bool:
         order_id = order.get("id")
         if not order_id or order_id in self._orders:
-            return None
+            return False
         legs = order.get("legs") or []
         leg = legs[0] if legs and isinstance(legs[0], dict) else {}
         if leg.get("side") != "buy" or leg.get("position_effect") != "open":
-            return None
+            return False
         try:
             price = Decimal(str(order.get("price")))
             contract = OptionContract(
@@ -227,19 +259,54 @@ class OrderLifecycleManager:
             )
         except Exception as exc:
             logger.warning("Could not adopt order %s: %s", order_id, exc)
-            return None
+            return False
+
+        option_id = leg.get("option_id")
+        processed = self._dec(order.get("processed_quantity")) or Decimal("0")
+
+        # Contracts already filled need stop-loss/DTE protection immediately —
+        # don't wait for the order to fully resolve before opening a Position.
+        if processed > 0:
+            qty = int(processed)
+            entry = self._avg_fill_premium(order, qty) or price
+            pos = Position(
+                position_id=order_id,
+                ticker=contract.ticker,
+                contract=contract,
+                entry_premium=entry,
+                target_level=None,
+                opened_at=datetime.now(timezone.utc),
+                quantity=qty,
+                option_instrument_id=option_id,
+            )
+            await self._store.add(pos)
+            logger.warning(
+                "Adopted partial fill %s x%d @ %s from order %s — position tracked immediately",
+                contract.ticker, qty, entry, order_id,
+            )
+
+        remaining = _remaining_quantity(order)
+        if remaining <= 0:
+            return True  # fully accounted for by the Position above (if any)
+
+        # A cancel was already in flight when the container stopped — resume
+        # watching for its outcome, but don't blindly chase a fill for an
+        # order someone/something already decided to cancel.
+        is_pending_cancel = state == "pending_cancelled"
         wo = WorkingOrder(
             order_id=order_id,
             contract=contract,
-            quantity=int(Decimal(str(order.get("quantity", "1")))),
+            quantity=remaining,
             price=price,
             candidate=None,
-            option_id=leg.get("option_id"),
+            option_id=option_id,
+            cancelling=is_pending_cancel,
+            giving_up=is_pending_cancel,
         )
         self._orders[order_id] = wo
-        logger.info("Adopted working order %s %s x%d @ %s",
-                    order_id, wo.ticker, wo.quantity, wo.price)
-        return wo
+        logger.info("Adopted working order %s %s x%d @ %s (state=%s)",
+                    order_id, wo.ticker, wo.quantity, wo.price, state)
+        return True
 
     # ------------------------------------------------------------------
     # Main loop

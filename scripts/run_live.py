@@ -228,6 +228,7 @@ async def main() -> None:
         cache=cache,
         tel=tel,
         config=config,
+        position_store=position_store,
     )
 
     history_dir = os.environ.get("HISTORY_DIR", "data/history")

@@ -62,3 +62,6 @@ avg P&L, and drawdown per regime/setup type. The harness works
       rejections (e.g. buying power) vs. the standard 30-min per-ticker
       cooldown — a fresh whale print on a *different* ticker will still hit
       the same account-wide wall immediately today.
+- [x] Keep held-position tickers in the scanner's discovery universe every
+      cycle so their GEXCache entry (and thesis-invalidation/trailing-stop
+      checks) doesn't go stale once the ticker stops trending.

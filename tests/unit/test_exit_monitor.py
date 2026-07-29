@@ -31,6 +31,7 @@ def _contract() -> OptionContract:
 def _position(
     target_level: str = "200",
     entry_premium: str = "3.00",
+    peak_premium: str | None = None,
 ) -> Position:
     return Position(
         position_id="pos-001",
@@ -39,6 +40,7 @@ def _position(
         entry_premium=Decimal(entry_premium),
         target_level=Decimal(target_level),
         opened_at=datetime(2026, 6, 28, 10, 0, tzinfo=timezone.utc),
+        peak_premium=Decimal(peak_premium) if peak_premium is not None else None,
     )
 
 
@@ -285,6 +287,76 @@ class TestThesisInvalidation:
             dte=14, as_of=AS_OF, current_setup=_setup(direction="none", regime=GEXRegime.MIXED),
         )
         assert result.reason == ExitReason.THESIS_INVALIDATED
+
+
+class TestTrailingStop:
+    # Default monitor: activation 0.30 (30% gain to arm), giveback 0.50 (exit
+    # after losing half the peak gain). entry=4.00 → activation threshold
+    # = 5.20; peak=8.00 → gain_at_peak=4.00 → giveback_floor = 4.00 + 4.00*0.50 = 6.00
+
+    def test_does_not_fire_without_peak_data(self):
+        # position never had its peak tracked (e.g. first tick after entry)
+        pos = _position(target_level="500", entry_premium="4.00", peak_premium=None)
+        result = DEFAULT_MONITOR.evaluate(
+            pos, current_price=Decimal("195"), current_premium=Decimal("1.00"), dte=14, as_of=AS_OF,
+        )
+        # stop_loss fires instead (peak-based trailing stop simply isn't armed)
+        assert result.reason == ExitReason.STOP_LOSS
+
+    def test_does_not_fire_when_never_reached_activation_threshold(self):
+        # peak only +12.5% over entry — below the 30% activation bar
+        pos = _position(target_level="500", entry_premium="4.00", peak_premium="4.50")
+        result = DEFAULT_MONITOR.evaluate(
+            pos, current_price=Decimal("195"), current_premium=Decimal("1.00"), dte=14, as_of=AS_OF,
+        )
+        assert result.reason == ExitReason.STOP_LOSS  # falls through to the plain stop-loss
+
+    def test_fires_once_giveback_threshold_breached(self):
+        pos = _position(target_level="500", entry_premium="4.00", peak_premium="8.00")
+        result = DEFAULT_MONITOR.evaluate(
+            pos, current_price=Decimal("195"), current_premium=Decimal("5.90"), dte=14, as_of=AS_OF,
+        )
+        assert result is not None
+        assert result.reason == ExitReason.TRAILING_STOP
+
+    def test_does_not_fire_while_still_holding_most_of_the_gain(self):
+        pos = _position(target_level="500", entry_premium="4.00", peak_premium="8.00")
+        result = DEFAULT_MONITOR.evaluate(
+            pos, current_price=Decimal("195"), current_premium=Decimal("6.10"), dte=14, as_of=AS_OF,
+        )
+        assert result is None
+
+    def test_fires_exactly_at_giveback_floor(self):
+        pos = _position(target_level="500", entry_premium="4.00", peak_premium="8.00")
+        result = DEFAULT_MONITOR.evaluate(
+            pos, current_price=Decimal("195"), current_premium=Decimal("6.00"), dte=14, as_of=AS_OF,
+        )
+        assert result.reason == ExitReason.TRAILING_STOP
+
+    def test_thesis_invalidated_takes_priority_over_trailing_stop(self):
+        pos = _position(target_level="500", entry_premium="4.00", peak_premium="8.00")
+        result = DEFAULT_MONITOR.evaluate(
+            pos, current_price=Decimal("195"), current_premium=Decimal("5.90"), dte=14, as_of=AS_OF,
+            current_setup=_setup(direction="none", regime=GEXRegime.MIXED),
+        )
+        assert result.reason == ExitReason.THESIS_INVALIDATED
+
+    def test_trailing_stop_takes_priority_over_stop_loss(self):
+        # Both conditions independently true: giveback_floor breached (6.00)
+        # AND price-based stop-loss breached (-35% of 4.00 = 2.60) — trailing
+        # stop is checked first and wins.
+        pos = _position(target_level="500", entry_premium="4.00", peak_premium="8.00")
+        result = DEFAULT_MONITOR.evaluate(
+            pos, current_price=Decimal("195"), current_premium=Decimal("2.50"), dte=14, as_of=AS_OF,
+        )
+        assert result.reason == ExitReason.TRAILING_STOP
+
+    def test_profit_target_takes_priority_over_trailing_stop(self):
+        pos = _position(target_level="200", entry_premium="4.00", peak_premium="8.00")
+        result = DEFAULT_MONITOR.evaluate(
+            pos, current_price=Decimal("200"), current_premium=Decimal("5.90"), dte=14, as_of=AS_OF,
+        )
+        assert result.reason == ExitReason.PROFIT_TARGET
 
 
 class TestPriority:

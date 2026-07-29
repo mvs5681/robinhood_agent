@@ -52,6 +52,16 @@ _FIELDS: dict[str, tuple] = {
         lambda v: 0.005 <= v <= 0.10,
         "must be between 0.005 (0.5%) and 0.10 (10%)",
     ),
+    "trailing_stop_activation_pct": (
+        float,
+        lambda v: 0.05 <= v <= 3.0,
+        "must be between 0.05 (5%) and 3.0 (300%)",
+    ),
+    "trailing_stop_giveback_pct": (
+        float,
+        lambda v: 0.05 <= v <= 0.95,
+        "must be between 0.05 (5%) and 0.95 (95%)",
+    ),
     "seed_tickers": (
         lambda v: [t.strip().upper() for t in (v.split(",") if isinstance(v, str) else v) if t.strip()],
         lambda v: len(v) <= 20 and all(_TICKER_RE.match(t) for t in v),
@@ -88,6 +98,8 @@ class LiveConfig:
     stop_loss_pct: float = 0.35
     dte_floor: int = 7
     wall_proximity_pct: float = 0.015
+    trailing_stop_activation_pct: float = 0.30
+    trailing_stop_giveback_pct: float = 0.50
     seed_tickers: list[str] = field(default_factory=list)
     # Contract selector window — kept in sync with SelectorParams defaults
     selector_dte_min: int = 21
@@ -105,6 +117,8 @@ class LiveConfig:
             stop_loss_pct=float(os.environ.get("STOP_LOSS_PCT", "0.35")),
             dte_floor=int(os.environ.get("DTE_FLOOR", "7")),
             wall_proximity_pct=float(os.environ.get("WALL_PROXIMITY_PCT", "0.015")),
+            trailing_stop_activation_pct=float(os.environ.get("TRAILING_STOP_ACTIVATION_PCT", "0.30")),
+            trailing_stop_giveback_pct=float(os.environ.get("TRAILING_STOP_GIVEBACK_PCT", "0.50")),
             seed_tickers=[t.strip().upper() for t in os.environ.get("TICKERS", "").split(",") if t.strip()],
             path=Path(path) if path else None,
         )
@@ -166,6 +180,8 @@ class LiveConfig:
             "stop_loss_pct": self.stop_loss_pct,
             "dte_floor": self.dte_floor,
             "wall_proximity_pct": self.wall_proximity_pct,
+            "trailing_stop_activation_pct": self.trailing_stop_activation_pct,
+            "trailing_stop_giveback_pct": self.trailing_stop_giveback_pct,
             "seed_tickers": self.seed_tickers,
             "selector_dte_min": self.selector_dte_min,
             "selector_dte_max": self.selector_dte_max,

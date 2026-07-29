@@ -121,6 +121,8 @@ class ExitLoop:
         if self._config is not None:
             self._monitor.stop_loss_pct = self._config.stop_loss_pct
             self._monitor.dte_floor = self._config.dte_floor
+            self._monitor.trailing_stop_activation_pct = self._config.trailing_stop_activation_pct
+            self._monitor.trailing_stop_giveback_pct = self._config.trailing_stop_giveback_pct
         positions = await self._store.all()
         if not positions:
             return
@@ -146,6 +148,13 @@ class ExitLoop:
         if premium is None:
             logger.debug("ExitLoop: no option quote for %s", pos.ticker)
             return
+
+        # Persist a new high-water mark immediately, regardless of whether an
+        # exit fires this tick — the trailing stop needs the peak to survive
+        # across ticks even through a dip that doesn't itself trigger anything.
+        if pos.peak_premium is None or premium > pos.peak_premium:
+            pos = pos.model_copy(update={"peak_premium": premium})
+            await self._store.add(pos)
 
         current_setup = await self._current_gex_setup(pos.ticker)
         signal = self._monitor.evaluate(pos, spot, premium, dte, current_setup=current_setup)
@@ -256,8 +265,9 @@ class ExitLoop:
 
     def _exit_limit_price(self, signal: ExitSignal) -> Decimal:
         price = signal.current_premium
-        if signal.reason == ExitReason.STOP_LOSS:
-            # Slightly below mid to improve fill probability under stress
+        if signal.reason in (ExitReason.STOP_LOSS, ExitReason.TRAILING_STOP):
+            # Slightly below mid to improve fill probability — both reasons
+            # mean "get out now," not "wait for a better price"
             return max(price * Decimal("0.95"), Decimal("0.01"))
         return price
 

@@ -12,6 +12,7 @@ Limitations of reconciled positions:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import date, datetime, timezone
@@ -129,6 +130,16 @@ def _to_position(item: dict) -> Position | None:
         return None
 
 
+async def _fetch_positions_once(
+    rh_tools: dict[str, "BaseTool"], account_number: str
+) -> list[dict]:
+    result = await rh_call(rh_tools, "get_option_positions", {
+        "account_number": account_number,
+        "nonzero": True,
+    })
+    return _parse_positions(result), result
+
+
 async def reconcile_positions(
     rh_tools: dict[str, "BaseTool"],
     position_store: "PositionStore",
@@ -137,18 +148,37 @@ async def reconcile_positions(
     """
     Fetch open option positions from RH and re-populate PositionStore.
     Returns the number of positions recovered.
+
+    On startup this is the sole source of truth for what's already open —
+    a false "0 positions" here leaves real, already-paid-for contracts with
+    no stop-loss/DTE/thesis protection for the rest of the session. A live
+    incident showed reconcile getting an empty result while the account
+    genuinely held 3 positions, with MCP session churn visible in the logs
+    around the same moment — so a single empty result is retried once after
+    a short delay before being accepted as ground truth.
     """
     logger.info("Reconciling open positions from Robinhood…")
-    try:
-        result = await rh_call(rh_tools, "get_option_positions", {
-            "account_number": account_number,
-            "nonzero": True,
-        })
-    except Exception as exc:
-        logger.error("Reconciliation failed — could not fetch option positions: %s", exc)
-        return 0
+    items: list[dict] = []
+    raw_result: object = None
+    for attempt in (1, 2):
+        try:
+            items, raw_result = await _fetch_positions_once(rh_tools, account_number)
+        except Exception as exc:
+            logger.error("Reconciliation failed — could not fetch option positions: %s", exc)
+            return 0
+        if items:
+            break
+        if attempt == 1:
+            logger.warning("reconcile_positions: 0 items on first attempt — retrying once")
+            await asyncio.sleep(3)
 
-    items = _parse_positions(result)
+    if not items:
+        # Zero positions is either genuinely correct or a silent parse/API
+        # miss — log the raw shape so a real occurrence is diagnosable from
+        # container logs alone instead of requiring a live re-query to prove
+        # or disprove (this exact gap cost real diagnosis time in practice).
+        logger.info("reconcile_positions: 0 items parsed after retry — raw response: %s",
+                    str(raw_result)[:500])
     recovered = 0
     for item in items:
         pos = _to_position(item)

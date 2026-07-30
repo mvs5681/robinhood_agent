@@ -65,3 +65,11 @@ avg P&L, and drawdown per regime/setup type. The harness works
 - [x] Keep held-position tickers in the scanner's discovery universe every
       cycle so their GEXCache entry (and thesis-invalidation/trailing-stop
       checks) doesn't go stale once the ticker stops trending.
+- [x] Harden `reconcile_positions` against a false "0 positions" result at
+      startup (retry once + log raw response on empty) — found live, 3 real
+      positions went unprotected for one restart cycle.
+- [ ] If the retry-once still isn't enough (recurs even after the retry),
+      the raw-response log added here will show what RH's MCP actually
+      returned in that moment — investigate from there rather than guessing
+      further. Consider also comparing reconciled position count against
+      the previous session's known-open count as an extra sanity check.

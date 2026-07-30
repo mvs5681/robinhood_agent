@@ -1,5 +1,26 @@
 # Changelog
 
+## 2026-07-30 (harden startup reconciliation against empty results)
+
+- **Fix: reconciliation silently reported 0 open positions while 3 were
+  genuinely open** — found live during a force-recreate: container logs
+  showed "Reconciliation complete — no open positions found in Robinhood"
+  moments after a live `get_option_positions` query confirmed CRWV, IWM,
+  and SMCI were all still open. `_parse_positions` was verified correct in
+  isolation for the exact live response shape (`{"data": {"positions":
+  [...]}}`), so this wasn't a parsing bug — the most likely cause is the
+  RH MCP session churn visible in the same log window (several
+  connect/400/reconnect cycles within ~3 seconds, right around the
+  reconciliation call). Net effect: all three positions ran with **zero**
+  stop-loss/DTE/thesis-invalidation/trailing-stop protection until the
+  next successful restart.
+  `reconcile_positions` now retries once (3s backoff) if the first fetch
+  parses to 0 items before accepting it as ground truth, and logs the raw
+  response on a final empty result so a real recurrence is diagnosable
+  from container logs alone instead of requiring a live re-query to prove
+  or disprove. New `tests/unit/test_reconciler.py` (11 tests) locks in the
+  live response shape parsing and the retry behavior.
+
 ## 2026-07-29 (fix autonomous-mode duplicate-signal dedup)
 
 - **Fix: autonomous mode had no duplicate-signal cooldown** — found live:

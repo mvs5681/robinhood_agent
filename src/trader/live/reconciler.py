@@ -4,6 +4,13 @@ On container restart, the in-memory PositionStore is empty even if open
 option positions exist in Robinhood. This module re-populates the store
 from get_option_positions so the exit loop can manage them immediately.
 
+get_option_positions alone is not enough to build a Position: it has no
+strike_price, and its own "type" field means long/short (not call/put).
+Each position's option_id is batch-looked-up via get_option_instruments to
+get the real strike/call-put type — without this, every position is
+silently dropped (found live: reconciliation reported "no open positions"
+while 3 were genuinely open, for however long this bug existed).
+
 Limitations of reconciled positions:
 - entry_premium: taken from RH average_price (cost basis / 100 per share)
 - target_level:  None — profit target disabled; stop-loss and DTE still active
@@ -52,8 +59,17 @@ def _parse_positions(result: object) -> list[dict]:
     return []
 
 
-def _to_position(item: dict) -> Position | None:
-    """Convert one RH position dict to a Position. Returns None if required fields missing."""
+def _to_position(item: dict, instrument: dict | None = None) -> Position | None:
+    """Convert one RH position dict to a Position. Returns None if required fields missing.
+
+    get_option_positions does not return strike_price or an option type —
+    its own "type" field means "long"/"short" (position direction), not
+    "call"/"put". Every real position dict is missing both fields the
+    moment this function needs them, so it silently rejected every
+    position it was ever given until reconcile_positions started passing
+    the matching get_option_instruments record via `instrument`, which is
+    where strike_price and the real call/put type actually live.
+    """
     try:
         option_url: str = item.get("option", "") or ""
         instrument_id: str | None = item.get("option_id") or item.get("id") or None
@@ -73,12 +89,18 @@ def _to_position(item: dict) -> Position | None:
             return None
         expiry = date.fromisoformat(expiry_str)
 
-        strike = Decimal(str(item.get("strike_price") or item.get("strike") or 0))
+        inst = instrument or {}
+        strike = Decimal(str(inst.get("strike_price") or item.get("strike_price") or item.get("strike") or 0))
         if not strike:
+            logger.debug("Reconcile: skipping %s — no strike (instrument lookup missing?)", ticker)
             return None
 
-        option_type: str = (item.get("option_type") or item.get("type") or "").lower()
+        # inst["type"] is the instrument's call/put; item.get("option_type")
+        # is a legacy fallback for a differently-shaped position record —
+        # item.get("type") is deliberately NOT used here, it's long/short.
+        option_type: str = str(inst.get("type") or item.get("option_type") or "").lower()
         if option_type not in ("call", "put"):
+            logger.debug("Reconcile: skipping %s — no call/put type (instrument lookup missing?)", ticker)
             return None
 
         quantity_str = item.get("quantity") or item.get("contracts") or "0"
@@ -140,6 +162,35 @@ async def _fetch_positions_once(
     return _parse_positions(result), result
 
 
+def _parse_instruments(result: object) -> list[dict]:
+    result = _unwrap_mcp(result)
+    if isinstance(result, list):
+        return result
+    if isinstance(result, dict):
+        inner = result.get("data", result)
+        if isinstance(inner, dict):
+            return inner.get("results", inner.get("instruments", []))
+        return result.get("results", result.get("instruments", []))
+    return []
+
+
+async def _fetch_instrument_details(
+    rh_tools: dict[str, "BaseTool"], option_ids: list[str]
+) -> dict[str, dict]:
+    """Batch-fetch strike_price/type (call/put) for a set of instrument ids —
+    see _to_position for why get_option_positions alone isn't enough."""
+    ids = [i for i in dict.fromkeys(option_ids) if i]  # dedup, preserve order
+    if not ids:
+        return {}
+    try:
+        result = await rh_call(rh_tools, "get_option_instruments", {"ids": ",".join(ids)})
+    except Exception as exc:
+        logger.error("reconcile_positions: instrument lookup failed: %s", exc)
+        return {}
+    items = _parse_instruments(result)
+    return {i["id"]: i for i in items if isinstance(i, dict) and i.get("id")}
+
+
 async def reconcile_positions(
     rh_tools: dict[str, "BaseTool"],
     position_store: "PositionStore",
@@ -179,9 +230,13 @@ async def reconcile_positions(
         # or disprove (this exact gap cost real diagnosis time in practice).
         logger.info("reconcile_positions: 0 items parsed after retry — raw response: %s",
                     str(raw_result)[:500])
+    option_ids = [item.get("option_id") or item.get("id") for item in items]
+    instruments = await _fetch_instrument_details(rh_tools, option_ids)
+
     recovered = 0
     for item in items:
-        pos = _to_position(item)
+        oid = item.get("option_id") or item.get("id")
+        pos = _to_position(item, instruments.get(oid))
         if pos is None:
             continue
         await position_store.add(pos)

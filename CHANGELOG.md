@@ -1,5 +1,28 @@
 # Changelog
 
+## 2026-07-30 (the real reconciliation bug: missing instrument enrichment)
+
+- **Fix the actual root cause behind "no open positions found" — found by
+  continuing to investigate after the empty-result retry (below) didn't
+  change the outcome on a real restart.** `get_option_positions` has no
+  `strike_price` field, and its own `"type"` field means `"long"`/`"short"`
+  (position direction) — not `"call"`/`"put"`. `_to_position` was reading
+  that `"type"` field as the option's call/put type, so every single real
+  position was silently rejected, every time, almost certainly since this
+  function was first written — the retry fix below was necessary but not
+  sufficient, since `items` was never actually empty; `_to_position` was
+  just discarding every real item it was handed.
+  `reconcile_positions` now batch-fetches each position's real strike/type
+  via `get_option_instruments` (`ids=<comma-separated option_ids>`) before
+  conversion — confirmed correct against the real account: recovers CRWV
+  ($80c), IWM ($302c), and SMCI ($35c) with correct strikes, types, and
+  entry premiums, verified against live-captured API responses for both
+  endpoints. `tests/unit/test_reconciler.py` rewritten to use the real
+  field shapes throughout (the previous version's fixtures had
+  `strike_price`/`option_type` directly on the position dict — a shape
+  that doesn't exist on the real API, which is exactly why those tests
+  passed while production silently failed).
+
 ## 2026-07-30 (harden startup reconciliation against empty results)
 
 - **Fix: reconciliation silently reported 0 open positions while 3 were

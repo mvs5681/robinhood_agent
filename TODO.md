@@ -68,8 +68,13 @@ avg P&L, and drawdown per regime/setup type. The harness works
 - [x] Harden `reconcile_positions` against a false "0 positions" result at
       startup (retry once + log raw response on empty) — found live, 3 real
       positions went unprotected for one restart cycle.
-- [ ] If the retry-once still isn't enough (recurs even after the retry),
-      the raw-response log added here will show what RH's MCP actually
-      returned in that moment — investigate from there rather than guessing
-      further. Consider also comparing reconciled position count against
-      the previous session's known-open count as an extra sanity check.
+- [x] Fix the actual root cause: `_to_position` read `get_option_positions`'
+      own `"type"` field (long/short) as if it were call/put and rejected
+      every real position. `reconcile_positions` now enriches each position
+      via `get_option_instruments` (batch `ids=` lookup) for the real
+      strike/type. Verified against the real account — recovers all 3 open
+      positions with correct strikes/types/premiums.
+- [x] Checked `order_manager.py`'s adoption path for the same class of gap —
+      it reads `strike_price`/`option_type` directly from order leg data
+      (`get_option_orders`), which genuinely includes both fields natively
+      (unlike `get_option_positions`). Not affected.

@@ -126,6 +126,9 @@ class ExitLoop:
             self._monitor.thesis_confidence_decay_pct = self._config.thesis_confidence_decay_pct
             self._monitor.thesis_wall_drift_pct = self._config.thesis_wall_drift_pct
             self._monitor.iv_scale_max_adjustment_pct = self._config.iv_scale_max_adjustment_pct
+            self._monitor.momentum_wall_adjustment_pct = self._config.momentum_wall_adjustment_pct
+            self._monitor.momentum_rsi_confirm_threshold = self._config.momentum_rsi_confirm_threshold
+            self._monitor.momentum_rsi_diverge_threshold = self._config.momentum_rsi_diverge_threshold
         positions = await self._store.all()
         if not positions:
             return

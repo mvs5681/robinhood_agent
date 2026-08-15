@@ -58,6 +58,17 @@ class ExitMonitor:
     disables scaling. No IV data available → multiplier is exactly 1 (identical
     to the static thresholds above).
 
+    momentum_wall_adjustment_pct: further adjusts the (already IV-scaled) profit-
+    target band using the position's DTE-agnostic RSI/MACD from context. If both
+    agree with continuation in the trade's direction (RSI past
+    momentum_rsi_confirm_threshold, MACD histogram signed the same way), the band
+    narrows by this fraction — let it ride closer to/through the wall instead of
+    exiting immediately. If either warns of reversal (RSI past
+    momentum_rsi_diverge_threshold on the wrong side, or histogram signed against
+    the trade), the band widens by this fraction — take the win now. Needs both
+    RSI and MACD to have a value; missing either is treated as neutral (no
+    adjustment). Only affects the profit-target gate.
+
     Fully synchronous; no I/O. Thesis invalidation and the trailing-stop peak both
     arrive as plain arguments — any cache/state lookup happens in the caller.
     """
@@ -72,6 +83,9 @@ class ExitMonitor:
         thesis_confidence_decay_pct: float = 0.50,
         thesis_wall_drift_pct: float = 1.0,
         iv_scale_max_adjustment_pct: float = 0.50,
+        momentum_wall_adjustment_pct: float = 0.50,
+        momentum_rsi_confirm_threshold: float = 55.0,
+        momentum_rsi_diverge_threshold: float = 45.0,
     ) -> None:
         self.stop_loss_pct = stop_loss_pct
         self.dte_floor = dte_floor
@@ -79,6 +93,9 @@ class ExitMonitor:
         self.trailing_stop_activation_pct = trailing_stop_activation_pct
         self.trailing_stop_giveback_pct = trailing_stop_giveback_pct
         self.iv_scale_max_adjustment_pct = iv_scale_max_adjustment_pct
+        self.momentum_wall_adjustment_pct = momentum_wall_adjustment_pct
+        self.momentum_rsi_confirm_threshold = momentum_rsi_confirm_threshold
+        self.momentum_rsi_diverge_threshold = momentum_rsi_diverge_threshold
         # Thesis-confidence decay (TODO.md:83-87): exit before a full
         # direction flip if the structure that justified the trade has
         # already eroded meaningfully from what it looked like at entry.
@@ -143,6 +160,13 @@ class ExitMonitor:
         effective_stop_loss_pct = Decimal(str(self.stop_loss_pct)) * widen
         effective_giveback_pct = Decimal(str(self.trailing_stop_giveback_pct)) * narrow
 
+        momentum = self._momentum_signal(position, context)
+        momentum_adj = Decimal(str(self.momentum_wall_adjustment_pct))
+        if momentum == "confirm":
+            effective_wall_proximity_pct *= 1 - momentum_adj  # narrower band — let it ride
+        elif momentum == "diverge":
+            effective_wall_proximity_pct *= 1 + momentum_adj  # wider band — take the win now
+
         if position.target_level is not None:
             target = position.target_level
             is_call = position.contract.type == "call"
@@ -191,6 +215,34 @@ class ExitMonitor:
         adj = Decimal(str(self.iv_scale_max_adjustment_pct))
         delta = -s * adj if invert else s * adj
         return 1 + delta
+
+    def _momentum_signal(self, position: Position, context: ExitContext | None) -> str:
+        """"confirm" if RSI+MACD both agree with continuation in the trade's
+        direction, "diverge" if either warns of reversal, else "neutral".
+        Needs both indicators present — a single stale/missing signal isn't
+        enough to act on, so it's treated as neutral rather than guessing."""
+        if context is None:
+            return "neutral"
+        rsi = context.rsi_latest()
+        macd_hist = context.macd_histogram_latest()
+        if rsi is None or macd_hist is None:
+            return "neutral"
+
+        confirm_t = Decimal(str(self.momentum_rsi_confirm_threshold))
+        diverge_t = Decimal(str(self.momentum_rsi_diverge_threshold))
+        is_call = position.contract.type == "call"
+
+        if is_call:
+            if rsi >= confirm_t and macd_hist > 0:
+                return "confirm"
+            if rsi <= diverge_t or macd_hist < 0:
+                return "diverge"
+        else:
+            if rsi <= (100 - confirm_t) and macd_hist < 0:
+                return "confirm"
+            if rsi >= (100 - diverge_t) or macd_hist > 0:
+                return "diverge"
+        return "neutral"
 
     def _thesis_confidence_decayed(
         self, position: Position, current_setup: "GEXSetup"

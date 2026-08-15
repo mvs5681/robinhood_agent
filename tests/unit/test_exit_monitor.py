@@ -8,7 +8,7 @@ import pytest
 from trader.exits.monitor import ExitMonitor
 from trader.exits.schemas import ExitContext, ExitReason, Position
 from trader.gex.schemas import GEXRegime, GEXSetup, GEXWall
-from trader.uw.schemas import InterpolatedIVEntry, OptionContract
+from trader.uw.schemas import InterpolatedIVEntry, OptionContract, TechnicalPoint
 
 
 # ---------------------------------------------------------------------------
@@ -50,6 +50,16 @@ def _context(iv_percentile: str, dte: int = 14) -> ExitContext:
     return ExitContext(interpolated_iv=[
         InterpolatedIVEntry(days=dte, volatility=Decimal("0.3"), percentile=Decimal(iv_percentile)),
     ])
+
+
+def _momentum_context(rsi: str | None, macd_histogram: str | None) -> ExitContext:
+    technicals = {}
+    if rsi is not None:
+        technicals["RSI"] = [TechnicalPoint(timestamp="2026-06-30", value=Decimal(rsi))]
+    if macd_histogram is not None:
+        technicals["MACD"] = [TechnicalPoint(timestamp="2026-06-30",
+                                              histogram=Decimal(macd_histogram))]
+    return ExitContext(technicals=technicals)
 
 
 def _wall(distance_pct: str, side: str = "call_wall", strike: str = "205") -> GEXWall:
@@ -519,6 +529,103 @@ class TestIVScaledThresholds:
         result = monitor.evaluate(
             pos, current_price=Decimal("196"), current_premium=Decimal("3.50"), dte=14, as_of=AS_OF,
             context=_context("100", dte=14),
+        )
+        assert result is None
+
+
+class TestMomentumConfirmation:
+    # Held position is a "call". Base wall_proximity_pct=0.015, target=200 →
+    # base threshold 200*(1-0.015)=197.0. Default momentum_wall_adjustment_pct=0.50.
+
+    def test_confirming_momentum_narrows_band_delays_exit(self):
+        # RSI=60 (>=55 confirm) + MACD histogram positive → confirm → band
+        # narrows to 0.0075 → threshold 198.5. 197.5 fires at base, not here.
+        pos = _position(target_level="200")
+        base = DEFAULT_MONITOR.evaluate(
+            pos, current_price=Decimal("197.5"), current_premium=Decimal("3.50"),
+            dte=14, as_of=AS_OF,
+        )
+        assert base.reason == ExitReason.PROFIT_TARGET
+        with_momentum = DEFAULT_MONITOR.evaluate(
+            pos, current_price=Decimal("197.5"), current_premium=Decimal("3.50"),
+            dte=14, as_of=AS_OF, context=_momentum_context(rsi="60", macd_histogram="0.5"),
+        )
+        assert with_momentum is None
+
+    def test_diverging_momentum_widens_band_fires_earlier(self):
+        # RSI=40 (<=45 diverge) → diverge → band widens to 0.0225 →
+        # threshold 195.5. 196 does NOT fire at base, fires here.
+        pos = _position(target_level="200")
+        base = DEFAULT_MONITOR.evaluate(
+            pos, current_price=Decimal("196"), current_premium=Decimal("3.50"),
+            dte=14, as_of=AS_OF,
+        )
+        assert base is None
+        with_momentum = DEFAULT_MONITOR.evaluate(
+            pos, current_price=Decimal("196"), current_premium=Decimal("3.50"),
+            dte=14, as_of=AS_OF, context=_momentum_context(rsi="40", macd_histogram="0.5"),
+        )
+        assert with_momentum.reason == ExitReason.PROFIT_TARGET
+
+    def test_diverging_macd_alone_widens_band(self):
+        # RSI neutral (50) but MACD histogram negative — still diverge for a call
+        pos = _position(target_level="200")
+        result = DEFAULT_MONITOR.evaluate(
+            pos, current_price=Decimal("196"), current_premium=Decimal("3.50"),
+            dte=14, as_of=AS_OF, context=_momentum_context(rsi="50", macd_histogram="-0.1"),
+        )
+        assert result.reason == ExitReason.PROFIT_TARGET
+
+    def test_neutral_signals_leave_band_unchanged(self):
+        pos = _position(target_level="200")
+        result = DEFAULT_MONITOR.evaluate(
+            pos, current_price=Decimal("197.5"), current_premium=Decimal("3.50"),
+            dte=14, as_of=AS_OF, context=_momentum_context(rsi="50", macd_histogram="0.1"),
+        )
+        # base threshold 197.0 → 197.5 fires regardless (unchanged band)
+        assert result.reason == ExitReason.PROFIT_TARGET
+
+    def test_missing_macd_treated_as_neutral(self):
+        pos = _position(target_level="200")
+        result = DEFAULT_MONITOR.evaluate(
+            pos, current_price=Decimal("196"), current_premium=Decimal("3.50"),
+            dte=14, as_of=AS_OF, context=_momentum_context(rsi="60", macd_histogram=None),
+        )
+        assert result is None  # below base threshold 197.0, no momentum adjustment applied
+
+    def test_put_direction_mirrors_thresholds(self):
+        from datetime import date as _date
+
+        put_contract = OptionContract(
+            ticker="AAPL", expiry=_date(2026, 7, 25), strike=Decimal("190"),
+            type="put", bid=Decimal("2.90"), ask=Decimal("3.10"),
+            open_interest=9000, volume=4500,
+        )
+        pos = Position(
+            position_id="pos-put", ticker="AAPL", contract=put_contract,
+            entry_premium=Decimal("3.00"), target_level=Decimal("190"),
+            opened_at=datetime(2026, 6, 28, 10, 0, tzinfo=timezone.utc),
+        )
+        # base threshold: 190*(1+0.015)=192.85 — 192.5 fires at base (put: price<=threshold)
+        base = DEFAULT_MONITOR.evaluate(
+            pos, current_price=Decimal("192.5"), current_premium=Decimal("3.50"),
+            dte=14, as_of=AS_OF,
+        )
+        assert base.reason == ExitReason.PROFIT_TARGET
+        # confirming bearish momentum (RSI<=45, MACD<0) narrows the band —
+        # threshold drops to 190*(1+0.0075)=191.425, 192.5 no longer fires
+        with_momentum = DEFAULT_MONITOR.evaluate(
+            pos, current_price=Decimal("192.5"), current_premium=Decimal("3.50"),
+            dte=14, as_of=AS_OF, context=_momentum_context(rsi="40", macd_histogram="-0.5"),
+        )
+        assert with_momentum is None
+
+    def test_zero_adjustment_disables_momentum_effect(self):
+        monitor = ExitMonitor(momentum_wall_adjustment_pct=0.0)
+        pos = _position(target_level="200")
+        result = monitor.evaluate(
+            pos, current_price=Decimal("196"), current_premium=Decimal("3.50"),
+            dte=14, as_of=AS_OF, context=_momentum_context(rsi="40", macd_histogram="-0.5"),
         )
         assert result is None
 

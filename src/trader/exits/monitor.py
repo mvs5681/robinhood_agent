@@ -19,8 +19,15 @@ class ExitMonitor:
       1. Profit target      — underlying price within wall_proximity_pct of the GEX gamma wall
       2. Thesis invalidated — the live GEX setup no longer supports the direction
                                this position was bought for (regime flipped or
-                               went mixed) — exits before price-based stop-loss
-                               would otherwise have to absorb the full decay
+                               went mixed), OR the structure has decayed
+                               meaningfully from its entry-time snapshot even
+                               without a full flip: live structure_confidence
+                               fell below thesis_confidence_decay_pct of entry
+                               confidence, or the held-side wall's distance
+                               from spot grew by more than thesis_wall_drift_pct
+                               vs entry (or the wall disappeared). Exits before
+                               price-based stop-loss would otherwise have to
+                               absorb the full decay.
       3. Trailing stop       — position ran up ≥ trailing_stop_activation_pct over
                                entry at some point (position.peak_premium), then gave
                                back ≥ trailing_stop_giveback_pct of that peak gain.
@@ -53,12 +60,21 @@ class ExitMonitor:
         wall_proximity_pct: float = 0.015,
         trailing_stop_activation_pct: float = 0.30,
         trailing_stop_giveback_pct: float = 0.50,
+        thesis_confidence_decay_pct: float = 0.50,
+        thesis_wall_drift_pct: float = 1.0,
     ) -> None:
         self.stop_loss_pct = stop_loss_pct
         self.dte_floor = dte_floor
         self.wall_proximity_pct = Decimal(str(wall_proximity_pct))
         self.trailing_stop_activation_pct = trailing_stop_activation_pct
         self.trailing_stop_giveback_pct = trailing_stop_giveback_pct
+        # Thesis-confidence decay (TODO.md:83-87): exit before a full
+        # direction flip if the structure that justified the trade has
+        # already eroded meaningfully from what it looked like at entry.
+        self.thesis_confidence_decay_pct = thesis_confidence_decay_pct  # exit once live
+            # structure_confidence falls below this fraction of entry confidence
+        self.thesis_wall_drift_pct = thesis_wall_drift_pct  # exit once the held-side
+            # wall's distance from spot grows by more than this fraction vs entry
 
     def evaluate(
         self,
@@ -113,12 +129,15 @@ class ExitMonitor:
             if not is_call and current_price <= target * (1 + self.wall_proximity_pct):
                 return ExitReason.PROFIT_TARGET
 
-        # The setup this position was bought for is gone: regime went mixed
-        # (candidate_direction "none") or flipped to the opposite side of
-        # what we're holding. Either way the original reason to hold no
-        # longer applies — exit before a price-based stop has to catch it.
-        if current_setup is not None and current_setup.candidate_direction != position.contract.type:
-            return ExitReason.THESIS_INVALIDATED
+        if current_setup is not None:
+            # The setup this position was bought for is gone: regime went mixed
+            # (candidate_direction "none") or flipped to the opposite side of
+            # what we're holding. Either way the original reason to hold no
+            # longer applies — exit before a price-based stop has to catch it.
+            if current_setup.candidate_direction != position.contract.type:
+                return ExitReason.THESIS_INVALIDATED
+            if self._thesis_confidence_decayed(position, current_setup):
+                return ExitReason.THESIS_INVALIDATED
 
         if position.peak_premium is not None:
             activation = position.entry_premium * Decimal(str(1 + self.trailing_stop_activation_pct))
@@ -138,3 +157,29 @@ class ExitMonitor:
             return ExitReason.DTE_STOP
 
         return None
+
+    def _thesis_confidence_decayed(
+        self, position: Position, current_setup: "GEXSetup"
+    ) -> bool:
+        """True if the live structure has eroded meaningfully from its
+        entry-time snapshot, even though candidate_direction hasn't flipped
+        outright. No entry snapshot (reconciled/adopted positions, same as
+        target_level=None) means there's nothing to diff against — fall back
+        to the binary flip check above only."""
+        entry_setup = position.entry_gex_setup
+        if entry_setup is None or entry_setup.structure_confidence <= 0:
+            return False
+
+        decay_floor = entry_setup.structure_confidence * self.thesis_confidence_decay_pct
+        if current_setup.structure_confidence < decay_floor:
+            return True
+
+        is_call = position.contract.type == "call"
+        entry_wall = entry_setup.nearest_call_wall if is_call else entry_setup.nearest_put_wall
+        live_wall = current_setup.nearest_call_wall if is_call else current_setup.nearest_put_wall
+        if entry_wall is None:
+            return False  # nothing to compare drift against
+        if live_wall is None:
+            return True  # the wall that supported this trade is gone
+        drift_ceiling = entry_wall.distance_pct * Decimal(str(1 + self.thesis_wall_drift_pct))
+        return live_wall.distance_pct > drift_ceiling

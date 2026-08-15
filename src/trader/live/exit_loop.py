@@ -123,6 +123,8 @@ class ExitLoop:
             self._monitor.dte_floor = self._config.dte_floor
             self._monitor.trailing_stop_activation_pct = self._config.trailing_stop_activation_pct
             self._monitor.trailing_stop_giveback_pct = self._config.trailing_stop_giveback_pct
+            self._monitor.thesis_confidence_decay_pct = self._config.thesis_confidence_decay_pct
+            self._monitor.thesis_wall_drift_pct = self._config.thesis_wall_drift_pct
         positions = await self._store.all()
         if not positions:
             return

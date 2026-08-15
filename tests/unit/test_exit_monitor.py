@@ -7,7 +7,7 @@ import pytest
 
 from trader.exits.monitor import ExitMonitor
 from trader.exits.schemas import ExitReason, Position
-from trader.gex.schemas import GEXRegime, GEXSetup
+from trader.gex.schemas import GEXRegime, GEXSetup, GEXWall
 from trader.uw.schemas import OptionContract
 
 
@@ -32,6 +32,7 @@ def _position(
     target_level: str = "200",
     entry_premium: str = "3.00",
     peak_premium: str | None = None,
+    entry_gex_setup: GEXSetup | None = None,
 ) -> Position:
     return Position(
         position_id="pos-001",
@@ -41,16 +42,28 @@ def _position(
         target_level=Decimal(target_level),
         opened_at=datetime(2026, 6, 28, 10, 0, tzinfo=timezone.utc),
         peak_premium=Decimal(peak_premium) if peak_premium is not None else None,
+        entry_gex_setup=entry_gex_setup,
     )
 
 
-def _setup(direction: str = "call", regime: GEXRegime = GEXRegime.NEGATIVE) -> GEXSetup:
+def _wall(distance_pct: str, side: str = "call_wall", strike: str = "205") -> GEXWall:
+    return GEXWall(strike=Decimal(strike), net_gex=Decimal("1000"),
+                    distance_pct=Decimal(distance_pct), side=side)
+
+
+def _setup(
+    direction: str = "call",
+    regime: GEXRegime = GEXRegime.NEGATIVE,
+    confidence: float = 0.6,
+    call_wall: GEXWall | None = None,
+    put_wall: GEXWall | None = None,
+) -> GEXSetup:
     return GEXSetup(
         ticker="AAPL", as_of=AS_OF, spot_price=Decimal("195"), regime=regime,
-        flip_point=None, nearest_call_wall=None, nearest_put_wall=None,
+        flip_point=None, nearest_call_wall=call_wall, nearest_put_wall=put_wall,
         target_level=Decimal("200"), candidate_direction=direction,
         setup_type="momentum" if direction != "none" else "none",
-        structure_confidence=0.6, raw_gex_by_strike=[],
+        structure_confidence=confidence, raw_gex_by_strike=[],
     )
 
 
@@ -287,6 +300,113 @@ class TestThesisInvalidation:
             dte=14, as_of=AS_OF, current_setup=_setup(direction="none", regime=GEXRegime.MIXED),
         )
         assert result.reason == ExitReason.THESIS_INVALIDATED
+
+
+class TestThesisConfidenceDecay:
+    # Held position is a "call" — entry snapshot has confidence 0.6 and a
+    # call_wall at 2% distance. Default monitor: decay_pct=0.50 (floor 0.30),
+    # wall_drift_pct=1.0 (ceiling = 2% * 2 = 4%).
+
+    def test_no_entry_snapshot_never_fires_on_decay_alone(self):
+        # No entry_gex_setup (reconciled/adopted position) — nothing to diff
+        # against, so only the binary flip check (already covered above) applies.
+        pos = _position(target_level="500", entry_gex_setup=None)
+        result = DEFAULT_MONITOR.evaluate(
+            pos, current_price=Decimal("195"), current_premium=Decimal("3.10"),
+            dte=14, as_of=AS_OF,
+            current_setup=_setup(direction="call", confidence=0.05),
+        )
+        assert result is None
+
+    def test_fires_when_confidence_falls_below_decay_floor(self):
+        entry_setup = _setup(direction="call", confidence=0.6, call_wall=_wall("0.02"))
+        pos = _position(target_level="500", entry_gex_setup=entry_setup)
+        result = DEFAULT_MONITOR.evaluate(
+            pos, current_price=Decimal("195"), current_premium=Decimal("3.10"),
+            dte=14, as_of=AS_OF,
+            current_setup=_setup(direction="call", confidence=0.20, call_wall=_wall("0.02")),
+        )
+        assert result is not None
+        assert result.reason == ExitReason.THESIS_INVALIDATED
+
+    def test_does_not_fire_when_confidence_holds_above_floor(self):
+        entry_setup = _setup(direction="call", confidence=0.6, call_wall=_wall("0.02"))
+        pos = _position(target_level="500", entry_gex_setup=entry_setup)
+        result = DEFAULT_MONITOR.evaluate(
+            pos, current_price=Decimal("195"), current_premium=Decimal("3.10"),
+            dte=14, as_of=AS_OF,
+            current_setup=_setup(direction="call", confidence=0.45, call_wall=_wall("0.02")),
+        )
+        assert result is None
+
+    def test_fires_when_held_side_wall_drifts_beyond_ceiling(self):
+        entry_setup = _setup(direction="call", confidence=0.6, call_wall=_wall("0.02"))
+        pos = _position(target_level="500", entry_gex_setup=entry_setup)
+        # confidence unchanged (0.6, well above the 0.30 floor) but the call
+        # wall retreated from 2% to 5% distance — beyond the 4% ceiling
+        result = DEFAULT_MONITOR.evaluate(
+            pos, current_price=Decimal("195"), current_premium=Decimal("3.10"),
+            dte=14, as_of=AS_OF,
+            current_setup=_setup(direction="call", confidence=0.6, call_wall=_wall("0.05")),
+        )
+        assert result is not None
+        assert result.reason == ExitReason.THESIS_INVALIDATED
+
+    def test_does_not_fire_when_wall_drift_within_tolerance(self):
+        entry_setup = _setup(direction="call", confidence=0.6, call_wall=_wall("0.02"))
+        pos = _position(target_level="500", entry_gex_setup=entry_setup)
+        result = DEFAULT_MONITOR.evaluate(
+            pos, current_price=Decimal("195"), current_premium=Decimal("3.10"),
+            dte=14, as_of=AS_OF,
+            current_setup=_setup(direction="call", confidence=0.6, call_wall=_wall("0.03")),
+        )
+        assert result is None
+
+    def test_fires_when_held_side_wall_disappears(self):
+        entry_setup = _setup(direction="call", confidence=0.6, call_wall=_wall("0.02"))
+        pos = _position(target_level="500", entry_gex_setup=entry_setup)
+        result = DEFAULT_MONITOR.evaluate(
+            pos, current_price=Decimal("195"), current_premium=Decimal("3.10"),
+            dte=14, as_of=AS_OF,
+            current_setup=_setup(direction="call", confidence=0.6, call_wall=None),
+        )
+        assert result is not None
+        assert result.reason == ExitReason.THESIS_INVALIDATED
+
+    def test_no_drift_signal_when_entry_had_no_wall_either(self):
+        # entry setup itself never had a call_wall (e.g. NEGATIVE-momentum
+        # setup type) — nothing to compare drift against, so it's a no-op
+        entry_setup = _setup(direction="call", confidence=0.6, call_wall=None)
+        pos = _position(target_level="500", entry_gex_setup=entry_setup)
+        result = DEFAULT_MONITOR.evaluate(
+            pos, current_price=Decimal("195"), current_premium=Decimal("3.10"),
+            dte=14, as_of=AS_OF,
+            current_setup=_setup(direction="call", confidence=0.6, call_wall=None),
+        )
+        assert result is None
+
+    def test_custom_decay_pct_and_wall_drift_pct(self):
+        monitor = ExitMonitor(thesis_confidence_decay_pct=0.80, thesis_wall_drift_pct=0.10)
+        entry_setup = _setup(direction="call", confidence=0.6, call_wall=_wall("0.02"))
+        pos = _position(target_level="500", entry_gex_setup=entry_setup)
+        # confidence 0.40 would pass the default 0.30 floor but fails the
+        # stricter 0.80*0.6=0.48 floor here
+        result = monitor.evaluate(
+            pos, current_price=Decimal("195"), current_premium=Decimal("3.10"),
+            dte=14, as_of=AS_OF,
+            current_setup=_setup(direction="call", confidence=0.40, call_wall=_wall("0.02")),
+        )
+        assert result.reason == ExitReason.THESIS_INVALIDATED
+
+    def test_profit_target_takes_priority_over_confidence_decay(self):
+        entry_setup = _setup(direction="call", confidence=0.6, call_wall=_wall("0.02"))
+        pos = _position(target_level="200", entry_gex_setup=entry_setup)
+        result = DEFAULT_MONITOR.evaluate(
+            pos, current_price=Decimal("200"), current_premium=Decimal("5.00"),
+            dte=14, as_of=AS_OF,
+            current_setup=_setup(direction="call", confidence=0.05, call_wall=None),
+        )
+        assert result.reason == ExitReason.PROFIT_TARGET
 
 
 class TestTrailingStop:

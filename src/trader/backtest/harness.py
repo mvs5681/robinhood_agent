@@ -102,6 +102,14 @@ class BacktestHarness:
         # 1. Evaluate exits for all currently open positions
         still_open: list[BacktestPosition] = []
         for pos in state.open_positions:
+            current_premium = data_slice.get_option_premium(pos.contract)
+            # Persist a new high-water mark before evaluating exits, regardless
+            # of whether one fires today — mirrors ExitLoop._evaluate() so the
+            # trailing stop's peak survives across days through a dip.
+            if current_premium is not None and (
+                pos.peak_premium is None or current_premium > pos.peak_premium
+            ):
+                pos.peak_premium = current_premium
             exit_signal = self.policy.should_exit(pos, data_slice)
             record = record_by_id[pos.position_id]
             if exit_signal:

@@ -24,6 +24,9 @@ class BacktestPosition:
     opened_on: date
     contracts: int = 1          # number of option contracts entered
     sector: str | None = None
+    peak_premium: Decimal | None = None  # highest premium observed since entry —
+                                         # updated by the harness each simulated day,
+                                         # mirrors ExitLoop's live tracking
 
     @property
     def entry_cost(self) -> Decimal:
@@ -42,6 +45,7 @@ class BacktestPosition:
             target_level=self.target_level,
             opened_at=datetime.combine(self.opened_on, time(9, 30), tzinfo=timezone.utc),
             sector=self.sector,
+            peak_premium=self.peak_premium,
         )
 
     @classmethod

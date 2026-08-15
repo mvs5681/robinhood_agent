@@ -22,10 +22,12 @@ from trader.contracts.selector import SelectorParams
 from trader.executor.schemas import ExecutionMode
 from trader.exits.monitor import ExitMonitor
 from trader.exits.schemas import ExitSignal
-from trader.gex.schemas import GEXDetectorParams
+from trader.gex.detector import GEXDetector
+from trader.gex.schemas import GEXDetectorParams, GEXSetup
 from trader.graph.agent import run_pipeline
 from trader.risk.schemas import RiskParams
 from trader.scoring.schemas import CandidateSignal
+from trader.uw.validators import parse_spot_gex_by_strike
 
 from .data_store import BacktestDataSlice
 from .schemas import BacktestPosition
@@ -91,6 +93,7 @@ class StandardPolicy(PolicyAdapter):
         self._exit_monitor = exit_monitor or ExitMonitor()
         self._min_composite = min_composite_score
         self._bypass_flow_gate = bypass_flow_gate
+        self._detector = GEXDetector(detector_params)
 
     async def generate_and_score(
         self,
@@ -136,10 +139,33 @@ class StandardPolicy(PolicyAdapter):
 
         as_of = datetime.combine(data_slice.date, time(16, 0), tzinfo=timezone.utc)
 
+        current_setup = self._current_gex_setup(position.ticker, current_price, data_slice)
+
         return self._exit_monitor.evaluate(
             position.as_exit_position(),
             current_price=current_price,
             current_premium=current_premium,
             dte=dte,
             as_of=as_of,
+            current_setup=current_setup,
         )
+
+    def _current_gex_setup(
+        self,
+        ticker: str,
+        spot_price: Decimal,
+        data_slice: BacktestDataSlice,
+    ) -> GEXSetup | None:
+        """Re-derive the live GEXSetup for this day, the backtest analogue of
+        ExitLoop._current_gex_setup(). Lets THESIS_INVALIDATED fire in replay
+        the same way it does live, instead of being structurally unreachable."""
+        raw = data_slice.spot_gex_raw.get(ticker)
+        if not raw:
+            return None
+        try:
+            spot_gex = parse_spot_gex_by_strike(raw)
+            if not spot_gex:
+                return None
+            return self._detector.detect(ticker, spot_gex, spot_price)
+        except Exception:
+            return None

@@ -92,6 +92,15 @@ class ExitMonitor:
 
     Fully synchronous; no I/O. Thesis invalidation and the trailing-stop peak both
     arrive as plain arguments — any cache/state lookup happens in the caller.
+
+    dynamic_exits_enabled: master switch for every adjustment described above
+    (IV scaling, momentum confirmation, gamma-wall structure resolution,
+    thesis-confidence decay, earnings gap, liquidity awareness). False
+    reproduces the original static-threshold behavior exactly: entry-snapshotted
+    target_level, binary thesis direction-flip only, no IV/momentum/earnings/
+    liquidity adjustments. True by default here since callers construct this
+    directly (tests, backtest); the live default lives in LiveConfig and is
+    False until explicitly enabled.
     """
 
     def __init__(
@@ -110,7 +119,9 @@ class ExitMonitor:
         earnings_buffer_days: int = 2,
         liquidity_spread_widen_threshold_pct: float = 0.15,
         liquidity_wall_adjustment_pct: float = 0.50,
+        dynamic_exits_enabled: bool = True,
     ) -> None:
+        self.dynamic_exits_enabled = dynamic_exits_enabled
         self.stop_loss_pct = stop_loss_pct
         self.dte_floor = dte_floor
         self.wall_proximity_pct = Decimal(str(wall_proximity_pct))
@@ -183,44 +194,54 @@ class ExitMonitor:
     ) -> ExitReason | None:
         pnl_ratio = (current_premium - position.entry_premium) / position.entry_premium
 
-        iv_percentile = context.iv_percentile_at(dte) if context is not None else None
-        # Widening multiplier for wall_proximity_pct/stop_loss_pct (high IV → give
-        # more room / take profit sooner); narrowing for trailing_stop_giveback_pct
-        # (high IV → lock gains in faster). Both collapse to exactly 1 with no IV
-        # data, so behavior is unchanged when context/IV isn't available.
-        widen = self._iv_multiplier(iv_percentile, invert=False)
-        narrow = self._iv_multiplier(iv_percentile, invert=True)
-        effective_wall_proximity_pct = self.wall_proximity_pct * widen
-        effective_stop_loss_pct = Decimal(str(self.stop_loss_pct)) * widen
-        effective_giveback_pct = Decimal(str(self.trailing_stop_giveback_pct)) * narrow
+        near_earnings = False
+        effective_wall_proximity_pct = self.wall_proximity_pct
+        effective_stop_loss_pct = Decimal(str(self.stop_loss_pct))
+        effective_giveback_pct = Decimal(str(self.trailing_stop_giveback_pct))
 
-        momentum = self._momentum_signal(position, context)
-        momentum_adj = Decimal(str(self.momentum_wall_adjustment_pct))
-        if momentum == "confirm":
-            effective_wall_proximity_pct *= 1 - momentum_adj  # narrower band — let it ride
-        elif momentum == "diverge":
-            effective_wall_proximity_pct *= 1 + momentum_adj  # wider band — take the win now
+        if self.dynamic_exits_enabled:
+            iv_percentile = context.iv_percentile_at(dte) if context is not None else None
+            # Widening multiplier for wall_proximity_pct/stop_loss_pct (high IV → give
+            # more room / take profit sooner); narrowing for trailing_stop_giveback_pct
+            # (high IV → lock gains in faster). Both collapse to exactly 1 with no IV
+            # data, so behavior is unchanged when context/IV isn't available.
+            widen = self._iv_multiplier(iv_percentile, invert=False)
+            narrow = self._iv_multiplier(iv_percentile, invert=True)
+            effective_wall_proximity_pct = effective_wall_proximity_pct * widen
+            effective_stop_loss_pct = effective_stop_loss_pct * widen
+            effective_giveback_pct = effective_giveback_pct * narrow
 
-        if (
-            spread_pct is not None
-            and spread_pct > Decimal(str(self.liquidity_spread_widen_threshold_pct))
-        ):
-            # deteriorating liquidity — waiting for an exact wall touch risks
-            # not getting filled at a reasonable price at all
-            effective_wall_proximity_pct *= 1 + Decimal(str(self.liquidity_wall_adjustment_pct))
+            momentum = self._momentum_signal(position, context)
+            momentum_adj = Decimal(str(self.momentum_wall_adjustment_pct))
+            if momentum == "confirm":
+                effective_wall_proximity_pct *= 1 - momentum_adj  # narrower band — let it ride
+            elif momentum == "diverge":
+                effective_wall_proximity_pct *= 1 + momentum_adj  # wider band — take the win now
 
-        near_earnings = (
-            days_to_earnings is not None and days_to_earnings <= self.earnings_buffer_days
-        )
-        if near_earnings and pnl_ratio <= 0:
-            # elevated pre-earnings IV shouldn't be allowed to widen the stop
-            # further than the static config intends — don't hold a loser
-            # open waiting for a bigger loss just because IV widened it
-            effective_stop_loss_pct = min(effective_stop_loss_pct, Decimal(str(self.stop_loss_pct)))
+            if (
+                spread_pct is not None
+                and spread_pct > Decimal(str(self.liquidity_spread_widen_threshold_pct))
+            ):
+                # deteriorating liquidity — waiting for an exact wall touch risks
+                # not getting filled at a reasonable price at all
+                effective_wall_proximity_pct *= 1 + Decimal(str(self.liquidity_wall_adjustment_pct))
+
+            near_earnings = (
+                days_to_earnings is not None and days_to_earnings <= self.earnings_buffer_days
+            )
+            if near_earnings and pnl_ratio <= 0:
+                # elevated pre-earnings IV shouldn't be allowed to widen the stop
+                # further than the static config intends — don't hold a loser
+                # open waiting for a bigger loss just because IV widened it
+                effective_stop_loss_pct = min(effective_stop_loss_pct, Decimal(str(self.stop_loss_pct)))
 
         if position.target_level is not None:
             is_call = position.contract.type == "call"
-            target = self._resolve_live_target(position, current_setup, is_call)
+            target = (
+                self._resolve_live_target(position, current_setup, is_call)
+                if self.dynamic_exits_enabled
+                else position.target_level
+            )
             if is_call and current_price >= target * (1 - effective_wall_proximity_pct):
                 return ExitReason.PROFIT_TARGET
             if not is_call and current_price <= target * (1 + effective_wall_proximity_pct):
@@ -236,7 +257,7 @@ class ExitMonitor:
             # longer applies — exit before a price-based stop has to catch it.
             if current_setup.candidate_direction != position.contract.type:
                 return ExitReason.THESIS_INVALIDATED
-            if self._thesis_confidence_decayed(position, current_setup):
+            if self.dynamic_exits_enabled and self._thesis_confidence_decayed(position, current_setup):
                 return ExitReason.THESIS_INVALIDATED
 
         if position.peak_premium is not None:

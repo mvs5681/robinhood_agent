@@ -29,6 +29,7 @@ from trader.backtest.data_store import DataStore
 from trader.backtest.harness import BacktestHarness
 from trader.backtest.metrics import BacktestResult
 from trader.backtest.policy import StandardPolicy
+from trader.exits.monitor import ExitMonitor
 
 
 def _parse_args() -> argparse.Namespace:
@@ -75,6 +76,18 @@ def _parse_args() -> argparse.Namespace:
         help=(
             "Skip the FlowTrigger gate (Phase 4) and treat all GEX-scored candidates as "
             "flow-confirmed. Use when backtesting with Polygon data, which has no flow alerts."
+        ),
+    )
+    p.add_argument(
+        "--dynamic-exits",
+        action="store_true",
+        default=False,
+        help=(
+            "Enable the dynamic exit adjustments (IV scaling, momentum confirmation, "
+            "gamma-wall structure, thesis-confidence decay, earnings-gap awareness) "
+            "instead of the original static thresholds. Off by default so a plain "
+            "invocation reproduces the pre-existing static baseline — run once without "
+            "this flag and once with it over the same window to compare."
         ),
     )
     p.add_argument("--json", action="store_true", help="Print metrics as JSON")
@@ -282,6 +295,7 @@ def main() -> None:
     policy = StandardPolicy(
         min_composite_score=args.min_composite,
         bypass_flow_gate=args.bypass_flow_gate,
+        exit_monitor=ExitMonitor(dynamic_exits_enabled=args.dynamic_exits),
     )
     harness = BacktestHarness(
         policy=policy,

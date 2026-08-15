@@ -20,8 +20,19 @@ logger = logging.getLogger(__name__)
 
 _TICKER_RE = re.compile(r"^[A-Z][A-Z0-9.\-]{0,9}$")
 
+def _parse_bool(v: object) -> bool:
+    if isinstance(v, bool):
+        return v
+    return str(v).strip().lower() in ("true", "1", "yes", "on")
+
+
 # field → (parser, validator, human description of the constraint)
 _FIELDS: dict[str, tuple] = {
+    "dynamic_exits_enabled": (
+        _parse_bool,
+        lambda v: True,
+        "must be true or false",
+    ),
     "discovery_min_premium": (
         lambda v: Decimal(str(v)),
         lambda v: v > 0,
@@ -137,6 +148,14 @@ _FIELDS: dict[str, tuple] = {
 
 @dataclass
 class LiveConfig:
+    # Master switch for the dynamic exit adjustments (IV scaling, momentum
+    # confirmation, gamma-wall structure, thesis-confidence decay, earnings/
+    # liquidity awareness) added on top of the original static thresholds.
+    # Defaults OFF: shipping this code must not silently change live trading
+    # behavior — enable only after validating in backtest, matching the
+    # project's "never enable new automated behavior without explicit
+    # approval + passing backtest" rule.
+    dynamic_exits_enabled: bool = False
     discovery_min_premium: Decimal = Decimal("250000")
     max_discovered_tickers: int = 20
     flow_min_premium: Decimal = Decimal("100000")
@@ -165,6 +184,7 @@ class LiveConfig:
     @classmethod
     def from_env(cls, path: Path | str | None = None) -> "LiveConfig":
         cfg = cls(
+            dynamic_exits_enabled=_parse_bool(os.environ.get("DYNAMIC_EXITS_ENABLED", "false")),
             discovery_min_premium=Decimal(os.environ.get("DISCOVERY_MIN_PREMIUM", "250000")),
             max_discovered_tickers=int(os.environ.get("MAX_DISCOVERED_TICKERS", "20")),
             flow_min_premium=Decimal(os.environ.get("FLOW_MIN_PREMIUM", "100000")),
@@ -241,6 +261,7 @@ class LiveConfig:
 
     def to_dict(self) -> dict:
         return {
+            "dynamic_exits_enabled": self.dynamic_exits_enabled,
             "discovery_min_premium": str(self.discovery_min_premium),
             "max_discovered_tickers": self.max_discovered_tickers,
             "flow_min_premium": str(self.flow_min_premium),

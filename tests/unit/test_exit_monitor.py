@@ -812,6 +812,92 @@ class TestLiquidityAwareness:
         assert result is None
 
 
+class TestDynamicExitsDisabled:
+    """dynamic_exits_enabled=False must reproduce the exact pre-dynamic-exit
+    behavior: static thresholds only, binary thesis flip only, entry-snapshotted
+    target_level only. This is the live-deployment default (LiveConfig.
+    dynamic_exits_enabled=False) — these tests are the safety net proving the
+    kill switch actually turns everything off, not just some of it."""
+
+    def _monitor(self, **kwargs) -> ExitMonitor:
+        return ExitMonitor(dynamic_exits_enabled=False, **kwargs)
+
+    def test_iv_percentile_has_no_effect(self):
+        # would fire under dynamic (see TestIVScaledThresholds) — not here
+        pos = _position(target_level="200")
+        result = self._monitor().evaluate(
+            pos, current_price=Decimal("196"), current_premium=Decimal("3.50"),
+            dte=14, as_of=AS_OF, context=_context("100", dte=14),
+        )
+        assert result is None
+
+    def test_momentum_has_no_effect(self):
+        pos = _position(target_level="200")
+        result = self._monitor().evaluate(
+            pos, current_price=Decimal("196"), current_premium=Decimal("3.50"),
+            dte=14, as_of=AS_OF, context=_momentum_context(rsi="40", macd_histogram="-0.5"),
+        )
+        assert result is None
+
+    def test_liquidity_spread_has_no_effect(self):
+        pos = _position(target_level="200")
+        result = self._monitor().evaluate(
+            pos, current_price=Decimal("196"), current_premium=Decimal("3.50"),
+            dte=14, as_of=AS_OF, spread_pct=Decimal("0.50"),
+        )
+        assert result is None
+
+    def test_live_wall_resolution_has_no_effect_uses_entry_snapshot(self):
+        # live wall says 210 (far away); entry snapshot says 200 (reached) —
+        # static behavior must use the entry snapshot and fire
+        pos = _position(target_level="200")
+        result = self._monitor().evaluate(
+            pos, current_price=Decimal("200"), current_premium=Decimal("5.00"),
+            dte=14, as_of=AS_OF,
+            current_setup=_setup(direction="call", call_wall=_wall("0.02", strike="210")),
+        )
+        assert result.reason == ExitReason.PROFIT_TARGET
+
+    def test_thesis_confidence_decay_has_no_effect_only_binary_flip_checked(self):
+        # confidence collapsed + wall vanished — would fire under dynamic
+        # (see TestThesisConfidenceDecay) but direction still matches, so
+        # static behavior (binary flip only) does not fire
+        entry_setup = _setup(direction="call", confidence=0.6, call_wall=_wall("0.02"))
+        pos = _position(target_level="500", entry_gex_setup=entry_setup)
+        result = self._monitor().evaluate(
+            pos, current_price=Decimal("195"), current_premium=Decimal("3.10"),
+            dte=14, as_of=AS_OF,
+            current_setup=_setup(direction="call", confidence=0.01, call_wall=None),
+        )
+        assert result is None
+
+    def test_earnings_gap_never_fires(self):
+        pos = _position(target_level="500", entry_premium="3.00")
+        result = self._monitor().evaluate(
+            pos, current_price=Decimal("195"), current_premium=Decimal("3.50"),
+            dte=14, as_of=AS_OF, days_to_earnings=1,
+        )
+        assert result is None
+
+    def test_binary_thesis_flip_still_works(self):
+        # the one pre-existing dynamic-adjacent behavior that predates all of
+        # this work — must still function with the switch off
+        pos = _position(target_level="500", entry_premium="3.00")
+        result = self._monitor().evaluate(
+            pos, current_price=Decimal("195"), current_premium=Decimal("3.10"),
+            dte=14, as_of=AS_OF, current_setup=_setup(direction="put"),
+        )
+        assert result.reason == ExitReason.THESIS_INVALIDATED
+
+    def test_static_stop_loss_and_dte_unaffected(self):
+        pos = _position(target_level="500", entry_premium="3.00")
+        result = self._monitor().evaluate(
+            pos, current_price=Decimal("195"), current_premium=Decimal("1.50"),  # -50%
+            dte=14, as_of=AS_OF,
+        )
+        assert result.reason == ExitReason.STOP_LOSS
+
+
 class TestTrailingStop:
     # Default monitor: activation 0.30 (30% gain to arm), giveback 0.50 (exit
     # after losing half the peak gain). entry=4.00 → activation threshold

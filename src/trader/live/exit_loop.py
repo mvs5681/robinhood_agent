@@ -121,6 +121,7 @@ class ExitLoop:
 
     async def _tick(self) -> None:
         if self._config is not None:
+            self._monitor.dynamic_exits_enabled = self._config.dynamic_exits_enabled
             self._monitor.stop_loss_pct = self._config.stop_loss_pct
             self._monitor.dte_floor = self._config.dte_floor
             self._monitor.trailing_stop_activation_pct = self._config.trailing_stop_activation_pct

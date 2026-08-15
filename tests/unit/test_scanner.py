@@ -104,3 +104,52 @@ class TestDiscoverTickersIncludesHeldPositions:
         )
         tickers, _ = await scanner._discover_tickers()
         assert set(tickers) == {"SPY", "CRWV"}
+
+
+def _empty_tool() -> MagicMock:
+    t = MagicMock()
+    t.ainvoke = AsyncMock(return_value={"data": []})
+    return t
+
+
+def _iv_tool(rows: list[dict]) -> MagicMock:
+    t = MagicMock()
+    t.ainvoke = AsyncMock(return_value={"data": rows})
+    return t
+
+
+class TestScanTickerFetchesInterpolatedIV:
+    """get_interpolated_iv was fully wired downstream (schema, validator,
+    TickerSnapshot field, iv_cost_score, state_capture serializer) but never
+    fetched — it wasn't even in ALLOWED_TOOL_NAMES, so live captures had
+    interpolated_iv permanently empty and iv_cost_score() silently degraded
+    to its 0.5 neutral default. This locks in the missing fetch call."""
+
+    def _tools(self, iv_tool=None) -> dict:
+        return {
+            "get_greek_exposure_by_strike": _empty_tool(),
+            "get_dark_pool_trades": _empty_tool(),
+            "get_flow_per_strike": _empty_tool(),
+            "get_options_chain": _empty_tool(),
+            "get_extended_technical_indicator": _empty_tool(),
+            "get_flow_alerts": _empty_tool(),
+            **({"get_interpolated_iv": iv_tool} if iv_tool is not None else {}),
+        }
+
+    async def test_calls_get_interpolated_iv_with_ticker(self):
+        iv_tool = _iv_tool([{"days": 30, "volatility": "0.25", "percentile": "40"}])
+        scanner = GEXScanner(uw_tools=self._tools(iv_tool), cache=GEXCache())
+
+        snap = await scanner._scan_ticker("AAPL")
+
+        iv_tool.ainvoke.assert_called_once_with({"ticker": "AAPL"})
+        assert len(snap.interpolated_iv) == 1
+        assert snap.interpolated_iv[0].days == 30
+        assert snap.interpolated_iv[0].percentile == Decimal("40")
+
+    async def test_missing_tool_degrades_to_empty_list_not_a_crash(self):
+        # No get_interpolated_iv key at all — _fetch's try/except must catch
+        # the KeyError and return [] rather than aborting the whole scan.
+        scanner = GEXScanner(uw_tools=self._tools(iv_tool=None), cache=GEXCache())
+        snap = await scanner._scan_ticker("AAPL")
+        assert snap.interpolated_iv == []

@@ -110,7 +110,7 @@ def _gen_events() -> list[dict]:
             events.append({
                 "timestamp": ts, "stage": "uw_fetch", "ticker": ticker,
                 "result": "ok", "duration_ms": round(rng.uniform(80, 350), 1),
-                "endpoint": "get_spot_exposures_by_strike", "record_count": rng.randint(30, 80),
+                "endpoint": "get_greek_exposure_by_strike", "record_count": rng.randint(30, 80),
             })
 
             for stage in DECISION_STAGES:

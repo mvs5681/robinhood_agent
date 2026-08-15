@@ -1,5 +1,50 @@
 # Changelog
 
+## 2026-08-15 (clean up orphaned MockUWTools mock module)
+
+- **Removed `src/trader/uw/mock_tools.py` and its dedicated test file** —
+  found while fixing the `get_spot_exposures_by_strike` tool-name drift
+  below: this whole `MockUWTools` class was dead code. It was imported in
+  `test_agent_graph.py` but never actually instantiated there (that file's
+  real tests use ad hoc `MagicMock` tool fixtures instead), leaving it
+  exercised only by its own `test_mock_tools.py`. Its method names had
+  drifted heavily from the real production tool names it was meant to
+  mirror — 6 of its ~11 methods (`get_stock_flow_alerts`,
+  `get_darkpool_ticker`, `get_net_prem_ticks`, `get_option_contracts`,
+  `get_greeks`, `get_technical_indicator`, `get_option_contracts_screener`)
+  don't match anything in `ALLOWED_TOOL_NAMES`. The real backtest harness
+  has used `BacktestDataSlice`/`DataStore` for this purpose since Phase 8;
+  this module predates that and was never cleaned up.
+  Also fixed the same tool-name drift in `test_agent_graph.py`'s
+  `test_pipeline_errors_do_not_crash` (ad hoc tool list used 3 names that
+  don't exist in production — didn't affect what the test actually
+  asserted, but was misleading) and a cosmetic label in
+  `scripts/demo_dashboard.py`'s synthetic telemetry generator.
+
+## 2026-08-15 (fix: get_interpolated_iv never actually fetched)
+
+- **`interpolated_iv` has been silently empty for every ticker, every day,
+  in both live trading and every captured backtest fixture — found while
+  scoping how to backtest against `data/history/`.** The feature was fully
+  built: `InterpolatedIVEntry` schema, `parse_interpolated_iv` validator,
+  `TickerSnapshot.interpolated_iv` field, `iv_cost_score()` consumer (20% of
+  the blend composite weight), the `state_capture.py` serializer, and the
+  backtest mock tools all exist and are correct. But `get_interpolated_iv`
+  was never added to `ALLOWED_TOOL_NAMES` in `trader/uw/mcp_config.py`, so
+  the MCP client filtered it out before `scanner.py` ever had a tool handle
+  to call — `_scan_ticker()` had no fetch call for it at all. `iv_cost_score()`
+  degrades gracefully to a neutral `0.5` on empty input, so this didn't crash
+  or bias anything — it just meant the IV-cost dimension of scoring
+  contributed zero real signal since the scanner was first written.
+  Fixed by adding `get_interpolated_iv` to `ALLOWED_TOOL_NAMES` and wiring
+  the fetch call into `_scan_ticker()`, in the fetch order the module's own
+  docstring always claimed ("spot GEX, darkpool, net-prem ticks, option
+  contracts, IV, technicals"). Per `fetch_history.py`'s documented UW
+  endpoint coverage, `interpolated-iv` isn't in the list of endpoints that
+  support historical `date=` filtering, so this only benefits captures going
+  forward — the 18 days already in `data/history/` will likely stay
+  IV-blind permanently.
+
 ## 2026-08-15 (full bug-class audit — order-adoption silent gap, risk-check bypass)
 
 Follow-up to the reconciliation and kill-switch bugs below: rather than wait

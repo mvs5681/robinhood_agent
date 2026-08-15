@@ -337,6 +337,9 @@ class GEXScanner:
                                      {"ticker": ticker, "limit": 50}, parse_option_contracts)
         snap.option_contracts = contracts
 
+        snap.interpolated_iv = await _fetch("get_interpolated_iv",
+                                            {"ticker": ticker}, parse_interpolated_iv)
+
         technicals: dict = {}
         for fn in ("RSI", "MACD"):
             rows = await _fetch(

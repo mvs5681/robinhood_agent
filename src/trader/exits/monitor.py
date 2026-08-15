@@ -49,6 +49,15 @@ class ExitMonitor:
     be given back before exiting. E.g. entry=4.00, peak=8.00 (gain=4.00), giveback
     0.50 → exits once premium falls to 4.00 + 4.00*(1-0.50) = 6.00.
 
+    iv_scale_max_adjustment_pct: when context carries an IV percentile for the
+    position's DTE, wall_proximity_pct/stop_loss_pct/trailing_stop_giveback_pct
+    are scaled by up to ±this fraction around IV percentile 50 (neutral) before
+    any gate is evaluated — high IV widens the stop and takes profit sooner
+    (vol-crush risk into the target), low IV tightens the stop and lets the
+    trailing stop run further (a low-noise move is more likely "real"). 0
+    disables scaling. No IV data available → multiplier is exactly 1 (identical
+    to the static thresholds above).
+
     Fully synchronous; no I/O. Thesis invalidation and the trailing-stop peak both
     arrive as plain arguments — any cache/state lookup happens in the caller.
     """
@@ -62,12 +71,14 @@ class ExitMonitor:
         trailing_stop_giveback_pct: float = 0.50,
         thesis_confidence_decay_pct: float = 0.50,
         thesis_wall_drift_pct: float = 1.0,
+        iv_scale_max_adjustment_pct: float = 0.50,
     ) -> None:
         self.stop_loss_pct = stop_loss_pct
         self.dte_floor = dte_floor
         self.wall_proximity_pct = Decimal(str(wall_proximity_pct))
         self.trailing_stop_activation_pct = trailing_stop_activation_pct
         self.trailing_stop_giveback_pct = trailing_stop_giveback_pct
+        self.iv_scale_max_adjustment_pct = iv_scale_max_adjustment_pct
         # Thesis-confidence decay (TODO.md:83-87): exit before a full
         # direction flip if the structure that justified the trade has
         # already eroded meaningfully from what it looked like at entry.
@@ -121,12 +132,23 @@ class ExitMonitor:
         current_setup: "GEXSetup | None" = None,
         context: ExitContext | None = None,
     ) -> ExitReason | None:
+        iv_percentile = context.iv_percentile_at(dte) if context is not None else None
+        # Widening multiplier for wall_proximity_pct/stop_loss_pct (high IV → give
+        # more room / take profit sooner); narrowing for trailing_stop_giveback_pct
+        # (high IV → lock gains in faster). Both collapse to exactly 1 with no IV
+        # data, so behavior is unchanged when context/IV isn't available.
+        widen = self._iv_multiplier(iv_percentile, invert=False)
+        narrow = self._iv_multiplier(iv_percentile, invert=True)
+        effective_wall_proximity_pct = self.wall_proximity_pct * widen
+        effective_stop_loss_pct = Decimal(str(self.stop_loss_pct)) * widen
+        effective_giveback_pct = Decimal(str(self.trailing_stop_giveback_pct)) * narrow
+
         if position.target_level is not None:
             target = position.target_level
             is_call = position.contract.type == "call"
-            if is_call and current_price >= target * (1 - self.wall_proximity_pct):
+            if is_call and current_price >= target * (1 - effective_wall_proximity_pct):
                 return ExitReason.PROFIT_TARGET
-            if not is_call and current_price <= target * (1 + self.wall_proximity_pct):
+            if not is_call and current_price <= target * (1 + effective_wall_proximity_pct):
                 return ExitReason.PROFIT_TARGET
 
         if current_setup is not None:
@@ -143,20 +165,32 @@ class ExitMonitor:
             activation = position.entry_premium * Decimal(str(1 + self.trailing_stop_activation_pct))
             gain_at_peak = position.peak_premium - position.entry_premium
             if position.peak_premium >= activation and gain_at_peak > 0:
-                giveback_floor = position.entry_premium + gain_at_peak * Decimal(
-                    str(1 - self.trailing_stop_giveback_pct)
+                giveback_floor = position.entry_premium + gain_at_peak * (
+                    1 - effective_giveback_pct
                 )
                 if current_premium <= giveback_floor:
                     return ExitReason.TRAILING_STOP
 
         pnl_ratio = (current_premium - position.entry_premium) / position.entry_premium
-        if pnl_ratio <= -Decimal(str(self.stop_loss_pct)):
+        if pnl_ratio <= -effective_stop_loss_pct:
             return ExitReason.STOP_LOSS
 
         if dte <= self.dte_floor:
             return ExitReason.DTE_STOP
 
         return None
+
+    def _iv_multiplier(self, iv_percentile: Decimal | None, *, invert: bool) -> Decimal:
+        """1 + s*max_adj (or 1 - s*max_adj when inverted), where s is IV
+        percentile rescaled from [0,100] to [-1,1] around the neutral midpoint
+        50. No IV data → exactly 1 (no-op)."""
+        if iv_percentile is None:
+            return Decimal("1")
+        p = max(Decimal("0"), min(Decimal("100"), iv_percentile))
+        s = (p - 50) / Decimal("50")
+        adj = Decimal(str(self.iv_scale_max_adjustment_pct))
+        delta = -s * adj if invert else s * adj
+        return 1 + delta
 
     def _thesis_confidence_decayed(
         self, position: Position, current_setup: "GEXSetup"

@@ -1321,6 +1321,8 @@ const SETTINGS_FIELDS = [
    hint:'Exit if live GEX structure_confidence falls below this fraction of its entry-time value (0.05–0.95, e.g. 0.50 = 50%)'},
   {key:'thesis_wall_drift_pct', label:'Thesis Wall Drift (fraction)', type:'number', step:'0.05',
    hint:'Exit if the held-side GEX wall retreats by more than this fraction vs its entry-time distance (0.10–5.0, e.g. 1.0 = wall distance doubled)'},
+  {key:'iv_scale_max_adjustment_pct', label:'IV Scale Max Adjustment (fraction)', type:'number', step:'0.05',
+   hint:'Scales wall proximity / stop loss / trailing giveback by up to ±this fraction around IV percentile 50 (0.0 disables, 0.8 = up to ±80%)'},
   {key:'selector_dte_min', label:'Contract Selector DTE Min (days)', type:'number',
    hint:'Minimum days-to-expiry when selecting contracts (default 21)'},
   {key:'selector_dte_max', label:'Contract Selector DTE Max (days)', type:'number',

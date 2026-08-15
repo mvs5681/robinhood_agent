@@ -6,9 +6,9 @@ from decimal import Decimal
 import pytest
 
 from trader.exits.monitor import ExitMonitor
-from trader.exits.schemas import ExitReason, Position
+from trader.exits.schemas import ExitContext, ExitReason, Position
 from trader.gex.schemas import GEXRegime, GEXSetup, GEXWall
-from trader.uw.schemas import OptionContract
+from trader.uw.schemas import InterpolatedIVEntry, OptionContract
 
 
 # ---------------------------------------------------------------------------
@@ -44,6 +44,12 @@ def _position(
         peak_premium=Decimal(peak_premium) if peak_premium is not None else None,
         entry_gex_setup=entry_gex_setup,
     )
+
+
+def _context(iv_percentile: str, dte: int = 14) -> ExitContext:
+    return ExitContext(interpolated_iv=[
+        InterpolatedIVEntry(days=dte, volatility=Decimal("0.3"), percentile=Decimal(iv_percentile)),
+    ])
 
 
 def _wall(distance_pct: str, side: str = "call_wall", strike: str = "205") -> GEXWall:
@@ -407,6 +413,114 @@ class TestThesisConfidenceDecay:
             current_setup=_setup(direction="call", confidence=0.05, call_wall=None),
         )
         assert result.reason == ExitReason.PROFIT_TARGET
+
+
+class TestIVScaledThresholds:
+    # DEFAULT_MONITOR: wall_proximity_pct=0.015, stop_loss_pct=0.35,
+    # trailing_stop_giveback_pct=0.50, iv_scale_max_adjustment_pct=0.50 (class default).
+
+    def test_high_iv_widens_profit_target_band_fires_earlier(self):
+        # base threshold: 200*(1-0.015)=197.0 — 196 would NOT fire without IV.
+        # high-IV (p=100) widened threshold: 200*(1-0.0225)=195.5 — 196 fires.
+        pos = _position(target_level="200")
+        no_context = DEFAULT_MONITOR.evaluate(
+            pos, current_price=Decimal("196"), current_premium=Decimal("3.50"), dte=14, as_of=AS_OF,
+        )
+        assert no_context is None
+        with_context = DEFAULT_MONITOR.evaluate(
+            pos, current_price=Decimal("196"), current_premium=Decimal("3.50"), dte=14, as_of=AS_OF,
+            context=_context("100", dte=14),
+        )
+        assert with_context.reason == ExitReason.PROFIT_TARGET
+
+    def test_low_iv_narrows_profit_target_band_fires_later(self):
+        # base threshold 197.0 would fire at 197.5; low-IV (p=0) narrowed
+        # threshold 200*(1-0.0075)=198.5 — 197.5 no longer fires.
+        pos = _position(target_level="200")
+        no_context = DEFAULT_MONITOR.evaluate(
+            pos, current_price=Decimal("197.5"), current_premium=Decimal("3.50"), dte=14, as_of=AS_OF,
+        )
+        assert no_context.reason == ExitReason.PROFIT_TARGET
+        with_context = DEFAULT_MONITOR.evaluate(
+            pos, current_price=Decimal("197.5"), current_premium=Decimal("3.50"), dte=14, as_of=AS_OF,
+            context=_context("0", dte=14),
+        )
+        assert with_context is None
+
+    def test_high_iv_widens_stop_loss_avoids_noise_stopout(self):
+        # base stop_loss_pct=0.35 → -40% would fire without IV context.
+        # high-IV (p=100) widened to 0.525 → -40% no longer fires.
+        pos = _position(target_level="500", entry_premium="3.00")
+        no_context = DEFAULT_MONITOR.evaluate(
+            pos, current_price=Decimal("195"), current_premium=Decimal("1.80"), dte=14, as_of=AS_OF,
+        )
+        assert no_context.reason == ExitReason.STOP_LOSS
+        with_context = DEFAULT_MONITOR.evaluate(
+            pos, current_price=Decimal("195"), current_premium=Decimal("1.80"), dte=14, as_of=AS_OF,
+            context=_context("100", dte=14),
+        )
+        assert with_context is None
+
+    def test_low_iv_tightens_stop_loss_fires_sooner(self):
+        # base stop_loss_pct=0.35 → -20% would NOT fire without IV context.
+        # low-IV (p=0) tightened to 0.175 → -20% fires.
+        pos = _position(target_level="500", entry_premium="3.00")
+        no_context = DEFAULT_MONITOR.evaluate(
+            pos, current_price=Decimal("195"), current_premium=Decimal("2.40"), dte=14, as_of=AS_OF,
+        )
+        assert no_context is None
+        with_context = DEFAULT_MONITOR.evaluate(
+            pos, current_price=Decimal("195"), current_premium=Decimal("2.40"), dte=14, as_of=AS_OF,
+            context=_context("0", dte=14),
+        )
+        assert with_context.reason == ExitReason.STOP_LOSS
+
+    def test_high_iv_narrows_trailing_giveback_locks_gains_sooner(self):
+        # entry=4.00 peak=8.00 gain=4.00. Base floor=4+4*0.50=6.00 (6.50 stays
+        # above it, no fire). High-IV (p=100) narrows giveback to 0.25 →
+        # floor=4+4*0.75=7.00 — 6.50 now fires.
+        pos = _position(target_level="500", entry_premium="4.00", peak_premium="8.00")
+        no_context = DEFAULT_MONITOR.evaluate(
+            pos, current_price=Decimal("195"), current_premium=Decimal("6.50"), dte=14, as_of=AS_OF,
+        )
+        assert no_context is None
+        with_context = DEFAULT_MONITOR.evaluate(
+            pos, current_price=Decimal("195"), current_premium=Decimal("6.50"), dte=14, as_of=AS_OF,
+            context=_context("100", dte=14),
+        )
+        assert with_context.reason == ExitReason.TRAILING_STOP
+
+    def test_low_iv_widens_trailing_giveback_lets_it_run(self):
+        # Base floor 6.00 fires at 5.90. Low-IV (p=0) widens giveback to
+        # 0.75 → floor=4+4*0.25=5.00 — 5.90 no longer fires.
+        pos = _position(target_level="500", entry_premium="4.00", peak_premium="8.00")
+        no_context = DEFAULT_MONITOR.evaluate(
+            pos, current_price=Decimal("195"), current_premium=Decimal("5.90"), dte=14, as_of=AS_OF,
+        )
+        assert no_context.reason == ExitReason.TRAILING_STOP
+        with_context = DEFAULT_MONITOR.evaluate(
+            pos, current_price=Decimal("195"), current_premium=Decimal("5.90"), dte=14, as_of=AS_OF,
+            context=_context("0", dte=14),
+        )
+        assert with_context is None
+
+    def test_context_with_no_iv_data_at_dte_behaves_like_no_context(self):
+        pos = _position(target_level="200")
+        empty_context = ExitContext()  # no interpolated_iv entries at all
+        result = DEFAULT_MONITOR.evaluate(
+            pos, current_price=Decimal("196"), current_premium=Decimal("3.50"), dte=14, as_of=AS_OF,
+            context=empty_context,
+        )
+        assert result is None
+
+    def test_zero_max_adjustment_disables_scaling_even_at_extreme_iv(self):
+        monitor = ExitMonitor(iv_scale_max_adjustment_pct=0.0)
+        pos = _position(target_level="200")
+        result = monitor.evaluate(
+            pos, current_price=Decimal("196"), current_premium=Decimal("3.50"), dte=14, as_of=AS_OF,
+            context=_context("100", dte=14),
+        )
+        assert result is None
 
 
 class TestTrailingStop:

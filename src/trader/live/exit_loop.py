@@ -125,6 +125,7 @@ class ExitLoop:
             self._monitor.trailing_stop_giveback_pct = self._config.trailing_stop_giveback_pct
             self._monitor.thesis_confidence_decay_pct = self._config.thesis_confidence_decay_pct
             self._monitor.thesis_wall_drift_pct = self._config.thesis_wall_drift_pct
+            self._monitor.iv_scale_max_adjustment_pct = self._config.iv_scale_max_adjustment_pct
         positions = await self._store.all()
         if not positions:
             return

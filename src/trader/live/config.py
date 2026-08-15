@@ -72,6 +72,11 @@ _FIELDS: dict[str, tuple] = {
         lambda v: 0.10 <= v <= 5.0,
         "must be between 0.10 (10%) and 5.0 (500%)",
     ),
+    "iv_scale_max_adjustment_pct": (
+        float,
+        lambda v: 0.0 <= v <= 0.8,
+        "must be between 0.0 (disabled) and 0.8 (80%)",
+    ),
     "seed_tickers": (
         lambda v: [t.strip().upper() for t in (v.split(",") if isinstance(v, str) else v) if t.strip()],
         lambda v: len(v) <= 20 and all(_TICKER_RE.match(t) for t in v),
@@ -112,6 +117,7 @@ class LiveConfig:
     trailing_stop_giveback_pct: float = 0.50
     thesis_confidence_decay_pct: float = 0.50
     thesis_wall_drift_pct: float = 1.0
+    iv_scale_max_adjustment_pct: float = 0.50
     seed_tickers: list[str] = field(default_factory=list)
     # Contract selector window — kept in sync with SelectorParams defaults
     selector_dte_min: int = 21
@@ -133,6 +139,7 @@ class LiveConfig:
             trailing_stop_giveback_pct=float(os.environ.get("TRAILING_STOP_GIVEBACK_PCT", "0.50")),
             thesis_confidence_decay_pct=float(os.environ.get("THESIS_CONFIDENCE_DECAY_PCT", "0.50")),
             thesis_wall_drift_pct=float(os.environ.get("THESIS_WALL_DRIFT_PCT", "1.0")),
+            iv_scale_max_adjustment_pct=float(os.environ.get("IV_SCALE_MAX_ADJUSTMENT_PCT", "0.50")),
             seed_tickers=[t.strip().upper() for t in os.environ.get("TICKERS", "").split(",") if t.strip()],
             path=Path(path) if path else None,
         )
@@ -198,6 +205,7 @@ class LiveConfig:
             "trailing_stop_giveback_pct": self.trailing_stop_giveback_pct,
             "thesis_confidence_decay_pct": self.thesis_confidence_decay_pct,
             "thesis_wall_drift_pct": self.thesis_wall_drift_pct,
+            "iv_scale_max_adjustment_pct": self.iv_scale_max_adjustment_pct,
             "seed_tickers": self.seed_tickers,
             "selector_dte_min": self.selector_dte_min,
             "selector_dte_max": self.selector_dte_max,

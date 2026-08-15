@@ -230,3 +230,111 @@ class TestEvaluateWithThesisInvalidation:
         # nothing triggers: price far from target, premium unchanged, dte n/a
         # (option_mid_and_dte with no rh_tools returns dte only, mid=None → returns early)
         assert len(await store.all()) == 1
+
+
+class TestParseNextEarningsDate:
+    def test_picks_nearest_upcoming_date(self):
+        loop = _loop(cache=None, rh_tools={})
+        result = {"data": {"results": [
+            {"symbol": "AAPL", "report_date": "2020-01-01"},  # past — excluded
+            {"symbol": "AAPL", "report_date": "2099-06-15"},
+            {"symbol": "AAPL", "report_date": "2099-03-01"},
+        ]}}
+        assert loop._parse_next_earnings_date(result) == date(2099, 3, 1)
+
+    def test_no_upcoming_dates_returns_none(self):
+        loop = _loop(cache=None, rh_tools={})
+        result = {"data": {"results": [{"symbol": "AAPL", "report_date": "2020-01-01"}]}}
+        assert loop._parse_next_earnings_date(result) is None
+
+    def test_empty_result_returns_none(self):
+        loop = _loop(cache=None, rh_tools={})
+        assert loop._parse_next_earnings_date({"data": {"results": []}}) is None
+
+
+class TestNextEarningsDate:
+    async def test_returns_none_when_tool_unavailable(self):
+        loop = _loop(cache=None, rh_tools={})
+        assert await loop._next_earnings_date("AAPL") is None
+
+    async def test_fetches_and_caches(self):
+        t = MagicMock()
+        t.ainvoke = AsyncMock(return_value={"data": {"results": [
+            {"symbol": "AAPL", "report_date": "2099-06-15"},
+        ]}})
+        loop = _loop(cache=None, rh_tools={"get_earnings_calendar": t})
+
+        first = await loop._next_earnings_date("AAPL")
+        second = await loop._next_earnings_date("AAPL")
+
+        assert first == date(2099, 6, 15)
+        assert second == date(2099, 6, 15)
+        t.ainvoke.assert_called_once()  # second call served from cache
+
+    async def test_failed_fetch_returns_none(self):
+        t = MagicMock()
+        t.ainvoke = AsyncMock(side_effect=RuntimeError("boom"))
+        loop = _loop(cache=None, rh_tools={"get_earnings_calendar": t})
+        assert await loop._next_earnings_date("AAPL") is None
+
+
+class TestParseSpreadPct:
+    def test_computes_spread_as_fraction_of_mid(self):
+        loop = _loop(cache=None, rh_tools={})
+        result = {"data": {"results": [{"price_book": {"bid_price": "2.90", "ask_price": "3.10"}}]}}
+        # mid=3.00, spread=0.20 → 0.20/3.00
+        assert loop._parse_spread_pct(result) == pytest.approx(Decimal("0.0667"), abs=Decimal("0.001"))
+
+    def test_missing_bid_ask_returns_none(self):
+        loop = _loop(cache=None, rh_tools={})
+        assert loop._parse_spread_pct({"data": {"results": [{}]}}) is None
+
+
+class TestOptionSpreadPct:
+    async def test_returns_none_when_tool_unavailable(self):
+        store = PositionStore()
+        pos = _position()
+        loop = _loop(cache=None, rh_tools={}, store=store)
+        assert await loop._option_spread_pct(pos) is None
+
+    async def test_fetches_spread_using_cached_instrument_id(self):
+        t = MagicMock()
+        t.ainvoke = AsyncMock(return_value={"data": {"results": [
+            {"price_book": {"bid_price": "2.90", "ask_price": "3.10"}}
+        ]}})
+        pos = _position()  # option_instrument_id="opt-1" already set
+        loop = _loop(cache=None, rh_tools={"get_option_price_book": t})
+
+        result = await loop._option_spread_pct(pos)
+
+        assert result is not None
+        t.ainvoke.assert_called_once_with({"instrument_ids": ["opt-1"]})
+
+
+class TestExitLimitPriceWithSpread:
+    def _signal(self, reason: ExitReason, premium: str = "5.00"):
+        from trader.exits.schemas import ExitSignal
+
+        return ExitSignal(
+            position_id="p1", ticker="AAPL", contract=_contract(), reason=reason,
+            current_premium=Decimal(premium), entry_premium=Decimal("3.00"),
+            pnl_pct=0.5, dte_remaining=14, as_of=datetime.now(timezone.utc),
+        )
+
+    def test_wide_spread_biases_toward_bid_on_profit_target(self):
+        loop = _loop(cache=None, rh_tools={})
+        signal = self._signal(ExitReason.PROFIT_TARGET)
+        price = loop._exit_limit_price(signal, spread_pct=Decimal("0.20"))
+        assert price == Decimal("5.00") * Decimal("0.97")
+
+    def test_narrow_spread_leaves_price_unchanged_on_profit_target(self):
+        loop = _loop(cache=None, rh_tools={})
+        signal = self._signal(ExitReason.PROFIT_TARGET)
+        price = loop._exit_limit_price(signal, spread_pct=Decimal("0.05"))
+        assert price == Decimal("5.00")
+
+    def test_stop_loss_discount_takes_priority_over_spread_bias(self):
+        loop = _loop(cache=None, rh_tools={})
+        signal = self._signal(ExitReason.STOP_LOSS)
+        price = loop._exit_limit_price(signal, spread_pct=Decimal("0.50"))
+        assert price == Decimal("5.00") * Decimal("0.95")

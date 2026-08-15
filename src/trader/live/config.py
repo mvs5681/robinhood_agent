@@ -92,6 +92,21 @@ _FIELDS: dict[str, tuple] = {
         lambda v: 10.0 <= v < 50.0,
         "must be between 10 and 50 (exclusive)",
     ),
+    "earnings_buffer_days": (
+        int,
+        lambda v: 0 <= v <= 10,
+        "must be between 0 and 10",
+    ),
+    "liquidity_spread_widen_threshold_pct": (
+        float,
+        lambda v: 0.01 <= v <= 1.0,
+        "must be between 0.01 (1%) and 1.0 (100%)",
+    ),
+    "liquidity_wall_adjustment_pct": (
+        float,
+        lambda v: 0.0 <= v <= 0.8,
+        "must be between 0.0 (disabled) and 0.8 (80%)",
+    ),
     "seed_tickers": (
         lambda v: [t.strip().upper() for t in (v.split(",") if isinstance(v, str) else v) if t.strip()],
         lambda v: len(v) <= 20 and all(_TICKER_RE.match(t) for t in v),
@@ -136,6 +151,9 @@ class LiveConfig:
     momentum_wall_adjustment_pct: float = 0.50
     momentum_rsi_confirm_threshold: float = 55.0
     momentum_rsi_diverge_threshold: float = 45.0
+    earnings_buffer_days: int = 2
+    liquidity_spread_widen_threshold_pct: float = 0.15
+    liquidity_wall_adjustment_pct: float = 0.50
     seed_tickers: list[str] = field(default_factory=list)
     # Contract selector window — kept in sync with SelectorParams defaults
     selector_dte_min: int = 21
@@ -161,6 +179,13 @@ class LiveConfig:
             momentum_wall_adjustment_pct=float(os.environ.get("MOMENTUM_WALL_ADJUSTMENT_PCT", "0.50")),
             momentum_rsi_confirm_threshold=float(os.environ.get("MOMENTUM_RSI_CONFIRM_THRESHOLD", "55.0")),
             momentum_rsi_diverge_threshold=float(os.environ.get("MOMENTUM_RSI_DIVERGE_THRESHOLD", "45.0")),
+            earnings_buffer_days=int(os.environ.get("EARNINGS_BUFFER_DAYS", "2")),
+            liquidity_spread_widen_threshold_pct=float(
+                os.environ.get("LIQUIDITY_SPREAD_WIDEN_THRESHOLD_PCT", "0.15")
+            ),
+            liquidity_wall_adjustment_pct=float(
+                os.environ.get("LIQUIDITY_WALL_ADJUSTMENT_PCT", "0.50")
+            ),
             seed_tickers=[t.strip().upper() for t in os.environ.get("TICKERS", "").split(",") if t.strip()],
             path=Path(path) if path else None,
         )
@@ -230,6 +255,9 @@ class LiveConfig:
             "momentum_wall_adjustment_pct": self.momentum_wall_adjustment_pct,
             "momentum_rsi_confirm_threshold": self.momentum_rsi_confirm_threshold,
             "momentum_rsi_diverge_threshold": self.momentum_rsi_diverge_threshold,
+            "earnings_buffer_days": self.earnings_buffer_days,
+            "liquidity_spread_widen_threshold_pct": self.liquidity_spread_widen_threshold_pct,
+            "liquidity_wall_adjustment_pct": self.liquidity_wall_adjustment_pct,
             "seed_tickers": self.seed_tickers,
             "selector_dte_min": self.selector_dte_min,
             "selector_dte_max": self.selector_dte_max,

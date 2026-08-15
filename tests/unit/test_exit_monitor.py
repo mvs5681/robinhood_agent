@@ -713,6 +713,105 @@ class TestGammaWallStructureAwareness:
         assert result is None
 
 
+class TestEarningsGap:
+    # Default monitor: earnings_buffer_days=2, stop_loss_pct=0.35.
+
+    def test_fires_when_profitable_and_earnings_within_buffer(self):
+        pos = _position(target_level="500", entry_premium="3.00")  # target far — no profit_target
+        result = DEFAULT_MONITOR.evaluate(
+            pos, current_price=Decimal("195"), current_premium=Decimal("3.50"),  # +16.7%
+            dte=14, as_of=AS_OF, days_to_earnings=1,
+        )
+        assert result is not None
+        assert result.reason == ExitReason.EARNINGS_GAP
+
+    def test_does_not_fire_when_profitable_but_earnings_outside_buffer(self):
+        pos = _position(target_level="500", entry_premium="3.00")
+        result = DEFAULT_MONITOR.evaluate(
+            pos, current_price=Decimal("195"), current_premium=Decimal("3.50"),
+            dte=14, as_of=AS_OF, days_to_earnings=5,
+        )
+        assert result is None
+
+    def test_does_not_fire_when_at_a_loss_near_earnings(self):
+        # -10% loss, within buffer — holds instead of forcing a loss sale
+        pos = _position(target_level="500", entry_premium="3.00")
+        result = DEFAULT_MONITOR.evaluate(
+            pos, current_price=Decimal("195"), current_premium=Decimal("2.70"),
+            dte=14, as_of=AS_OF, days_to_earnings=1,
+        )
+        assert result is None
+
+    def test_no_days_to_earnings_never_fires(self):
+        pos = _position(target_level="500", entry_premium="3.00")
+        result = DEFAULT_MONITOR.evaluate(
+            pos, current_price=Decimal("195"), current_premium=Decimal("3.50"),
+            dte=14, as_of=AS_OF,
+        )
+        assert result is None
+
+    def test_suspends_iv_widened_stop_loss_when_at_a_loss_near_earnings(self):
+        # High IV would normally widen stop_loss_pct to 0.525 (see
+        # TestIVScaledThresholds), masking a -40% loss. Near earnings the
+        # widening is suspended — capped back to the static 0.35 — so the
+        # loss still stops out instead of being held open by elevated IV.
+        pos = _position(target_level="500", entry_premium="3.00")
+        result = DEFAULT_MONITOR.evaluate(
+            pos, current_price=Decimal("195"), current_premium=Decimal("1.80"),  # -40%
+            dte=14, as_of=AS_OF, context=_context("100", dte=14), days_to_earnings=1,
+        )
+        assert result.reason == ExitReason.STOP_LOSS
+
+    def test_profit_target_takes_priority_over_earnings_gap(self):
+        pos = _position(target_level="200", entry_premium="3.00")
+        result = DEFAULT_MONITOR.evaluate(
+            pos, current_price=Decimal("200"), current_premium=Decimal("5.00"),
+            dte=14, as_of=AS_OF, days_to_earnings=1,
+        )
+        assert result.reason == ExitReason.PROFIT_TARGET
+
+    def test_earnings_gap_takes_priority_over_thesis_invalidated(self):
+        pos = _position(target_level="500", entry_premium="3.00")
+        result = DEFAULT_MONITOR.evaluate(
+            pos, current_price=Decimal("195"), current_premium=Decimal("3.50"),
+            dte=14, as_of=AS_OF, days_to_earnings=1,
+            current_setup=_setup(direction="none", regime=GEXRegime.MIXED),
+        )
+        assert result.reason == ExitReason.EARNINGS_GAP
+
+
+class TestLiquidityAwareness:
+    def test_wide_spread_widens_profit_target_band_fires_earlier(self):
+        # base threshold 197.0 — 196 does not fire without spread signal
+        pos = _position(target_level="200")
+        base = DEFAULT_MONITOR.evaluate(
+            pos, current_price=Decimal("196"), current_premium=Decimal("3.50"), dte=14, as_of=AS_OF,
+        )
+        assert base is None
+        with_spread = DEFAULT_MONITOR.evaluate(
+            pos, current_price=Decimal("196"), current_premium=Decimal("3.50"), dte=14, as_of=AS_OF,
+            spread_pct=Decimal("0.20"),  # above default 0.15 threshold
+        )
+        assert with_spread.reason == ExitReason.PROFIT_TARGET
+
+    def test_narrow_spread_leaves_band_unchanged(self):
+        pos = _position(target_level="200")
+        result = DEFAULT_MONITOR.evaluate(
+            pos, current_price=Decimal("196"), current_premium=Decimal("3.50"), dte=14, as_of=AS_OF,
+            spread_pct=Decimal("0.05"),  # below default 0.15 threshold
+        )
+        assert result is None
+
+    def test_zero_adjustment_disables_liquidity_effect(self):
+        monitor = ExitMonitor(liquidity_wall_adjustment_pct=0.0)
+        pos = _position(target_level="200")
+        result = monitor.evaluate(
+            pos, current_price=Decimal("196"), current_premium=Decimal("3.50"), dte=14, as_of=AS_OF,
+            spread_pct=Decimal("0.50"),
+        )
+        assert result is None
+
+
 class TestTrailingStop:
     # Default monitor: activation 0.30 (30% gain to arm), giveback 0.50 (exit
     # after losing half the peak gain). entry=4.00 → activation threshold

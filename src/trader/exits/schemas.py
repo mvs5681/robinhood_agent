@@ -16,6 +16,7 @@ class ExitReason(str, Enum):
     TRAILING_STOP = "trailing_stop"
     STOP_LOSS = "stop_loss"
     DTE_STOP = "dte_stop"
+    EARNINGS_GAP = "earnings_gap"
     MANUAL = "manual"
 
 

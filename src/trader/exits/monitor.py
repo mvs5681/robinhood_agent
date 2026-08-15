@@ -34,6 +34,15 @@ class ExitMonitor:
                                Catches the case thesis invalidation doesn't: the GEX
                                setup never structurally flipped, price just ran up and
                                reversed without ever reaching the wall.
+      3.5 Earnings gap        — days_to_earnings ≤ earnings_buffer_days AND the
+                               position is currently profitable: lock in gains
+                               ahead of a binary event instead of risking an
+                               IV-crush/gap through it. If unprofitable near
+                               earnings, holds instead (a loss forced out right
+                               before an event it might recover) but suspends
+                               any IV-driven widening of the stop-loss (below)
+                               so elevated pre-earnings IV can't hold a loser
+                               open past what the static config intends.
       4. Stop loss           — option premium dropped ≥ stop_loss_pct from entry
       5. DTE stop             — dte_remaining ≤ dte_floor (avoid final-week decay)
 
@@ -69,6 +78,18 @@ class ExitMonitor:
     RSI and MACD to have a value; missing either is treated as neutral (no
     adjustment). Only affects the profit-target gate.
 
+    earnings_buffer_days: see gate 3.5 above. days_to_earnings and spread_pct
+    (see below) are plain arguments like current_setup — any I/O to obtain
+    them (RH get_earnings_calendar / get_option_price_book) happens in the
+    caller.
+
+    liquidity_spread_widen_threshold_pct / liquidity_wall_adjustment_pct: when
+    spread_pct (bid-ask spread as a fraction of mid, from the caller) exceeds
+    the threshold, the profit-target band widens by the adjustment fraction —
+    deteriorating liquidity means waiting for an exact wall touch risks not
+    getting filled at a reasonable price at all, so take the win sooner.
+    Stacks with the IV/momentum adjustments above.
+
     Fully synchronous; no I/O. Thesis invalidation and the trailing-stop peak both
     arrive as plain arguments — any cache/state lookup happens in the caller.
     """
@@ -86,6 +107,9 @@ class ExitMonitor:
         momentum_wall_adjustment_pct: float = 0.50,
         momentum_rsi_confirm_threshold: float = 55.0,
         momentum_rsi_diverge_threshold: float = 45.0,
+        earnings_buffer_days: int = 2,
+        liquidity_spread_widen_threshold_pct: float = 0.15,
+        liquidity_wall_adjustment_pct: float = 0.50,
     ) -> None:
         self.stop_loss_pct = stop_loss_pct
         self.dte_floor = dte_floor
@@ -96,6 +120,9 @@ class ExitMonitor:
         self.momentum_wall_adjustment_pct = momentum_wall_adjustment_pct
         self.momentum_rsi_confirm_threshold = momentum_rsi_confirm_threshold
         self.momentum_rsi_diverge_threshold = momentum_rsi_diverge_threshold
+        self.earnings_buffer_days = earnings_buffer_days
+        self.liquidity_spread_widen_threshold_pct = liquidity_spread_widen_threshold_pct
+        self.liquidity_wall_adjustment_pct = liquidity_wall_adjustment_pct
         # Thesis-confidence decay (TODO.md:83-87): exit before a full
         # direction flip if the structure that justified the trade has
         # already eroded meaningfully from what it looked like at entry.
@@ -113,9 +140,12 @@ class ExitMonitor:
         as_of: datetime | None = None,
         current_setup: "GEXSetup | None" = None,
         context: ExitContext | None = None,
+        days_to_earnings: int | None = None,
+        spread_pct: Decimal | None = None,
     ) -> ExitSignal | None:
         reason = self._first_triggered(
-            position, current_price, current_premium, dte, current_setup, context
+            position, current_price, current_premium, dte, current_setup, context,
+            days_to_earnings, spread_pct,
         )
         if reason is None:
             return None
@@ -148,7 +178,11 @@ class ExitMonitor:
         dte: int,
         current_setup: "GEXSetup | None" = None,
         context: ExitContext | None = None,
+        days_to_earnings: int | None = None,
+        spread_pct: Decimal | None = None,
     ) -> ExitReason | None:
+        pnl_ratio = (current_premium - position.entry_premium) / position.entry_premium
+
         iv_percentile = context.iv_percentile_at(dte) if context is not None else None
         # Widening multiplier for wall_proximity_pct/stop_loss_pct (high IV → give
         # more room / take profit sooner); narrowing for trailing_stop_giveback_pct
@@ -167,6 +201,23 @@ class ExitMonitor:
         elif momentum == "diverge":
             effective_wall_proximity_pct *= 1 + momentum_adj  # wider band — take the win now
 
+        if (
+            spread_pct is not None
+            and spread_pct > Decimal(str(self.liquidity_spread_widen_threshold_pct))
+        ):
+            # deteriorating liquidity — waiting for an exact wall touch risks
+            # not getting filled at a reasonable price at all
+            effective_wall_proximity_pct *= 1 + Decimal(str(self.liquidity_wall_adjustment_pct))
+
+        near_earnings = (
+            days_to_earnings is not None and days_to_earnings <= self.earnings_buffer_days
+        )
+        if near_earnings and pnl_ratio <= 0:
+            # elevated pre-earnings IV shouldn't be allowed to widen the stop
+            # further than the static config intends — don't hold a loser
+            # open waiting for a bigger loss just because IV widened it
+            effective_stop_loss_pct = min(effective_stop_loss_pct, Decimal(str(self.stop_loss_pct)))
+
         if position.target_level is not None:
             is_call = position.contract.type == "call"
             target = self._resolve_live_target(position, current_setup, is_call)
@@ -174,6 +225,9 @@ class ExitMonitor:
                 return ExitReason.PROFIT_TARGET
             if not is_call and current_price <= target * (1 + effective_wall_proximity_pct):
                 return ExitReason.PROFIT_TARGET
+
+        if near_earnings and pnl_ratio > 0:
+            return ExitReason.EARNINGS_GAP
 
         if current_setup is not None:
             # The setup this position was bought for is gone: regime went mixed
@@ -195,7 +249,6 @@ class ExitMonitor:
                 if current_premium <= giveback_floor:
                     return ExitReason.TRAILING_STOP
 
-        pnl_ratio = (current_premium - position.entry_premium) / position.entry_premium
         if pnl_ratio <= -effective_stop_loss_pct:
             return ExitReason.STOP_LOSS
 

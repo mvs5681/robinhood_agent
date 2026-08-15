@@ -40,6 +40,7 @@ logger = logging.getLogger(__name__)
 
 _POLL_INTERVAL = 60
 _IDLE_SLEEP = 120
+_EARNINGS_CACHE_TTL = 86400  # 24h — earnings dates don't move intraday
 
 
 def _extract_order_id(result: object) -> str | None:
@@ -95,6 +96,7 @@ class ExitLoop:
         self._risk_engine = risk_engine
         self._config = config
         self._cache = cache
+        self._earnings_cache: dict[str, tuple[date | None, float]] = {}
 
     async def run(self) -> None:
         logger.info(
@@ -129,6 +131,11 @@ class ExitLoop:
             self._monitor.momentum_wall_adjustment_pct = self._config.momentum_wall_adjustment_pct
             self._monitor.momentum_rsi_confirm_threshold = self._config.momentum_rsi_confirm_threshold
             self._monitor.momentum_rsi_diverge_threshold = self._config.momentum_rsi_diverge_threshold
+            self._monitor.earnings_buffer_days = self._config.earnings_buffer_days
+            self._monitor.liquidity_spread_widen_threshold_pct = (
+                self._config.liquidity_spread_widen_threshold_pct
+            )
+            self._monitor.liquidity_wall_adjustment_pct = self._config.liquidity_wall_adjustment_pct
         positions = await self._store.all()
         if not positions:
             return
@@ -164,8 +171,12 @@ class ExitLoop:
 
         current_setup = await self._current_gex_setup(pos.ticker)
         context = await self._current_exit_context(pos.ticker)
+        earnings_date = await self._next_earnings_date(pos.ticker)
+        days_to_earnings = (earnings_date - date.today()).days if earnings_date else None
+        spread_pct = await self._option_spread_pct(pos)
         signal = self._monitor.evaluate(
-            pos, spot, premium, dte, current_setup=current_setup, context=context
+            pos, spot, premium, dte, current_setup=current_setup, context=context,
+            days_to_earnings=days_to_earnings, spread_pct=spread_pct,
         )
         if signal:
             extra = ""
@@ -176,7 +187,7 @@ class ExitLoop:
                 "Exit triggered %s reason=%s pnl=%.1f%% spot=%s premium=%s dte=%d%s",
                 pos.ticker, signal.reason.value, signal.pnl_pct * 100, spot, premium, dte, extra,
             )
-            await self._execute_exit(pos, signal, context)
+            await self._execute_exit(pos, signal, context, spread_pct)
 
     async def _current_gex_setup(self, ticker: str):
         """Live GEXSetup for thesis-invalidation checks, or None if unavailable
@@ -206,12 +217,93 @@ class ExitLoop:
             technicals=snap.technicals,
         )
 
+    async def _next_earnings_date(self, ticker: str) -> date | None:
+        """Next upcoming earnings date for the earnings-gap gate, cached per
+        ticker for _EARNINGS_CACHE_TTL (earnings dates don't move intraday,
+        no reason to call get_earnings_calendar every 60s tick)."""
+        cached = self._earnings_cache.get(ticker)
+        if cached is not None and (_time.time() - cached[1]) < _EARNINGS_CACHE_TTL:
+            return cached[0]
+        if not self._rh_tools or "get_earnings_calendar" not in self._rh_tools:
+            return None
+        try:
+            result = await rh_call(self._rh_tools, "get_earnings_calendar", {"symbol": ticker})
+            next_date = self._parse_next_earnings_date(result)
+        except Exception as exc:
+            logger.warning("get_earnings_calendar failed for %s: %s", ticker, exc)
+            next_date = None
+        self._earnings_cache[ticker] = (next_date, _time.time())
+        return next_date
+
+    def _parse_next_earnings_date(self, result: object) -> date | None:
+        items = _extract_items(result)
+        if not items and isinstance(result, dict):
+            inner = result.get("data", result)
+            items = [inner] if isinstance(inner, dict) else []
+        today = date.today()
+        upcoming: list[date] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            raw = item.get("report_date") or item.get("date") or item.get("earnings_date")
+            if not raw:
+                continue
+            try:
+                d = date.fromisoformat(str(raw)[:10])
+            except Exception:
+                continue
+            if d >= today:
+                upcoming.append(d)
+        return min(upcoming) if upcoming else None
+
+    async def _option_spread_pct(self, pos: Position) -> Decimal | None:
+        """Live bid-ask spread as a fraction of mid, for the liquidity-aware
+        wall-proximity gate. Best-effort — a failed/unavailable lookup just
+        means that gate contributes nothing this tick, same as missing IV or
+        technicals."""
+        if not self._rh_tools or "get_option_price_book" not in self._rh_tools:
+            return None
+        try:
+            instrument_id = pos.option_instrument_id or await self._resolve_instrument_id(pos)
+            result = await rh_call(self._rh_tools, "get_option_price_book",
+                                   {"instrument_ids": [instrument_id]})
+            return self._parse_spread_pct(result)
+        except Exception as exc:
+            logger.warning("get_option_price_book failed for %s: %s", pos.ticker, exc)
+            return None
+
+    def _parse_spread_pct(self, result: object) -> Decimal | None:
+        items = _extract_items(result)
+        if not items and isinstance(result, dict):
+            inner = result.get("data", result)
+            items = [inner] if isinstance(inner, dict) else []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            book = item.get("price_book") if isinstance(item.get("price_book"), dict) else item
+            bid = book.get("bid_price") or book.get("bid")
+            ask = book.get("ask_price") or book.get("ask")
+            if bid is None or ask is None:
+                continue
+            try:
+                bid_d, ask_d = Decimal(str(bid)), Decimal(str(ask))
+            except Exception:
+                continue
+            if bid_d > 0 and ask_d > 0:
+                mid = (bid_d + ask_d) / 2
+                return (ask_d - bid_d) / mid
+        return None
+
     # ------------------------------------------------------------------
     # Order placement
     # ------------------------------------------------------------------
 
     async def _execute_exit(
-        self, pos: Position, signal: ExitSignal, context: ExitContext | None = None
+        self,
+        pos: Position,
+        signal: ExitSignal,
+        context: ExitContext | None = None,
+        spread_pct: Decimal | None = None,
     ) -> None:
         t0 = _time.monotonic()
         order_id: str | None = None
@@ -226,7 +318,7 @@ class ExitLoop:
             try:
                 instrument_id = pos.option_instrument_id or await self._resolve_instrument_id(pos)
                 price = round_price_to_tick(
-                    self._exit_limit_price(signal),
+                    self._exit_limit_price(signal, spread_pct),
                     await self._instrument_min_ticks(instrument_id),
                 )
                 params = {
@@ -300,12 +392,21 @@ class ExitLoop:
             logger.warning("min_ticks lookup failed for %s: %s", instrument_id, exc)
         return None
 
-    def _exit_limit_price(self, signal: ExitSignal) -> Decimal:
+    def _exit_limit_price(
+        self, signal: ExitSignal, spread_pct: Decimal | None = None
+    ) -> Decimal:
         price = signal.current_premium
         if signal.reason in (ExitReason.STOP_LOSS, ExitReason.TRAILING_STOP):
             # Slightly below mid to improve fill probability — both reasons
             # mean "get out now," not "wait for a better price"
             return max(price * Decimal("0.95"), Decimal("0.01"))
+        if (
+            spread_pct is not None
+            and spread_pct > Decimal(str(self._monitor.liquidity_spread_widen_threshold_pct))
+        ):
+            # wide spread — a limit resting at mid may sit unfilled; bias
+            # toward the bid to actually get out
+            return max(price * Decimal("0.97"), Decimal("0.01"))
         return price
 
     # ------------------------------------------------------------------

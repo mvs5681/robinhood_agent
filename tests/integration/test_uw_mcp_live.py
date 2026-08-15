@@ -28,7 +28,7 @@ async def test_load_tools_returns_allowed_set():
     tools = await load_uw_tools()
     names = {t.name for t in tools}
     assert "get_flow_alerts" in names
-    assert "get_spot_exposures_by_strike" in names
+    assert "get_greek_exposure_by_strike" in names
     assert "get_market_tide" in names
 
 
@@ -54,9 +54,13 @@ async def test_market_tide_live():
 
 @pytest.mark.live
 async def test_spot_gex_live():
+    # Tool name here previously drifted from the real allowlist entry
+    # (get_spot_exposures_by_strike vs. get_greek_exposure_by_strike used
+    # everywhere in production) — this test would have KeyError'd on
+    # tool_map[...] the moment someone actually ran it with a live token.
     tools = await load_uw_tools()
     tool_map = {t.name: t for t in tools}
-    raw = await tool_map["get_spot_exposures_by_strike"].ainvoke({"ticker": "SPY"})
+    raw = await tool_map["get_greek_exposure_by_strike"].ainvoke({"ticker": "SPY"})
     strikes = parse_spot_gex_by_strike(raw)
     assert len(strikes) > 0
     # Each strike has a price and at least one non-zero gamma field

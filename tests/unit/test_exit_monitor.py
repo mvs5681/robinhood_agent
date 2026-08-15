@@ -630,6 +630,89 @@ class TestMomentumConfirmation:
         assert result is None
 
 
+class TestGammaWallStructureAwareness:
+    # Held position is a "call", entry target_level=200. current_setup's
+    # nearest_call_wall reflects the *live* wall re-derived each tick.
+
+    def test_uses_live_wall_instead_of_stale_entry_target(self):
+        # entry target 200 already reached (spot=201), but live wall has
+        # moved out to 210 (e.g. GEX structure shifted) — live wall wins,
+        # so profit target does NOT fire yet at 201.
+        pos = _position(target_level="200")
+        result = DEFAULT_MONITOR.evaluate(
+            pos, current_price=Decimal("201"), current_premium=Decimal("5.00"),
+            dte=14, as_of=AS_OF,
+            current_setup=_setup(direction="call", call_wall=_wall("0.02", side="call_wall", strike="210")),
+        )
+        assert result is None
+
+    def test_fires_once_price_reaches_the_advanced_live_wall(self):
+        pos = _position(target_level="200")
+        result = DEFAULT_MONITOR.evaluate(
+            pos, current_price=Decimal("210"), current_premium=Decimal("6.00"),
+            dte=14, as_of=AS_OF,
+            current_setup=_setup(direction="call", call_wall=_wall("0.001", side="call_wall", strike="210")),
+        )
+        assert result.reason == ExitReason.PROFIT_TARGET
+
+    def test_falls_back_to_entry_target_when_no_live_wall_available(self):
+        # current_setup present but its call_wall is None (e.g. spot ran past
+        # every strike in the chain) — fall back to the entry snapshot.
+        pos = _position(target_level="200")
+        result = DEFAULT_MONITOR.evaluate(
+            pos, current_price=Decimal("200"), current_premium=Decimal("5.00"),
+            dte=14, as_of=AS_OF,
+            current_setup=_setup(direction="call", call_wall=None),
+        )
+        assert result.reason == ExitReason.PROFIT_TARGET
+
+    def test_falls_back_to_entry_target_when_no_current_setup(self):
+        # no live context at all (stale/no cache) — same as pre-2d behavior.
+        pos = _position(target_level="200")
+        result = DEFAULT_MONITOR.evaluate(
+            pos, current_price=Decimal("200"), current_premium=Decimal("5.00"),
+            dte=14, as_of=AS_OF,
+        )
+        assert result.reason == ExitReason.PROFIT_TARGET
+
+    def test_put_direction_uses_live_put_wall(self):
+        put_contract = OptionContract(
+            ticker="AAPL", expiry=date(2026, 7, 25), strike=Decimal("190"),
+            type="put", bid=Decimal("2.90"), ask=Decimal("3.10"),
+            open_interest=9000, volume=4500,
+        )
+        pos = Position(
+            position_id="pos-put", ticker="AAPL", contract=put_contract,
+            entry_premium=Decimal("3.00"), target_level=Decimal("190"),
+            opened_at=datetime(2026, 6, 28, 10, 0, tzinfo=timezone.utc),
+        )
+        # entry target 190 already reached (spot=189), but live put wall has
+        # moved out to 180 — live wall wins, no fire yet at 189
+        live_put_wall = _wall("0.02", side="put_wall", strike="180")
+        result = DEFAULT_MONITOR.evaluate(
+            pos, current_price=Decimal("189"), current_premium=Decimal("5.00"),
+            dte=14, as_of=AS_OF,
+            current_setup=_setup(direction="put", put_wall=live_put_wall),
+        )
+        assert result is None
+
+    def test_no_target_level_never_uses_live_wall_either(self):
+        # reconciled/adopted positions (target_level=None) stay exempt from
+        # the profit-target gate entirely, live wall or not.
+        contract = _contract()
+        pos = Position(
+            position_id="pos-recon", ticker="AAPL", contract=contract,
+            entry_premium=Decimal("3.00"), target_level=None,
+            opened_at=datetime(2026, 6, 28, 10, 0, tzinfo=timezone.utc),
+        )
+        result = DEFAULT_MONITOR.evaluate(
+            pos, current_price=Decimal("210"), current_premium=Decimal("6.00"),
+            dte=14, as_of=AS_OF,
+            current_setup=_setup(direction="call", call_wall=_wall("0.001", strike="210")),
+        )
+        assert result is None
+
+
 class TestTrailingStop:
     # Default monitor: activation 0.30 (30% gain to arm), giveback 0.50 (exit
     # after losing half the peak gain). entry=4.00 → activation threshold

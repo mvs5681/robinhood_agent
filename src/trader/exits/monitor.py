@@ -168,8 +168,8 @@ class ExitMonitor:
             effective_wall_proximity_pct *= 1 + momentum_adj  # wider band — take the win now
 
         if position.target_level is not None:
-            target = position.target_level
             is_call = position.contract.type == "call"
+            target = self._resolve_live_target(position, current_setup, is_call)
             if is_call and current_price >= target * (1 - effective_wall_proximity_pct):
                 return ExitReason.PROFIT_TARGET
             if not is_call and current_price <= target * (1 + effective_wall_proximity_pct):
@@ -215,6 +215,25 @@ class ExitMonitor:
         adj = Decimal(str(self.iv_scale_max_adjustment_pct))
         delta = -s * adj if invert else s * adj
         return 1 + delta
+
+    def _resolve_live_target(
+        self, position: Position, current_setup: "GEXSetup | None", is_call: bool
+    ) -> Decimal:
+        """Prefer the live-resolved wall over the frozen entry-time snapshot
+        (position.target_level) as gate 1's price target. current_setup is
+        re-derived from live spot_gex each tick relative to *current* spot
+        (see ExitLoop._current_gex_setup / StandardPolicy._current_gex_setup),
+        so nearest_call_wall/nearest_put_wall already only consider strikes on
+        the far side of current spot — if the entry wall gets breached, the
+        next tick's live wall is automatically the next one out, with no
+        separate breach-detection needed. Falls back to the entry snapshot
+        when no live wall is available (stale/missing cache, or the wall
+        disappeared), same as gate 1's prior behavior."""
+        if current_setup is not None:
+            live_wall = current_setup.nearest_call_wall if is_call else current_setup.nearest_put_wall
+            if live_wall is not None:
+                return live_wall.strike
+        return position.target_level
 
     def _momentum_signal(self, position: Position, context: ExitContext | None) -> str:
         """"confirm" if RSI+MACD both agree with continuation in the trade's

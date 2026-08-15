@@ -29,6 +29,10 @@ record (see CHANGELOG 2026-08-15).
       `scripts/run_backtest.py` remains available for one-off manual runs
       with different params (metrics already sliced `by_regime`/
       `by_setup_type` in `BacktestResult`).
+- [x] `BacktestLoop` defaults to `bypass_flow_gate=True` — confirmed live
+      against the real corpus that captured `flow_alerts.json` snapshots
+      can be many hours stale relative to `FlowTrigger`'s 4h lookback,
+      rejecting 100% of candidates without it. See CHANGELOG 2026-08-15.
 - [ ] Backfill as many past days as the API allows for the endpoints that
       support it, to widen the regime coverage faster than daily capture
       alone accumulates it.
@@ -54,6 +58,11 @@ record (see CHANGELOG 2026-08-15).
       existing 60s poll) — flow alerts are current-data-only, so this is
       the only way to ever recover real intraday flow timing for replay.
       Would also raise the ceiling on how precise v2's matching above can be.
+      **No longer just a fidelity nice-to-have** — confirmed live that the
+      once-daily flow_alerts.json snapshot is stale enough to make
+      `FlowTrigger` reject 100% of candidates (see `bypass_flow_gate`
+      above); this is what actually removes the need for that workaround
+      and restores full-fidelity flow-gated backtesting.
 
 ## Later / nice to have
 

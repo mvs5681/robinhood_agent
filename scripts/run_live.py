@@ -250,6 +250,7 @@ async def main() -> None:
         results_file=backtest_results_file,
         initial_capital=float(os.environ.get("BACKTEST_CAPITAL", "2000")),
         max_concurrent_positions=risk_engine.params.max_concurrent_positions,
+        bypass_flow_gate=os.environ.get("BACKTEST_BYPASS_FLOW_GATE", "true").lower() not in ("false", "0", "no"),
     )
 
     watcher = FlowWatcher(

@@ -9,6 +9,7 @@ directly against the small fixture set.
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -26,6 +27,21 @@ def _loop(tmp_path: Path, **kwargs) -> BacktestLoop:
         min_coverage_days=kwargs.pop("min_coverage_days", 1),
         **kwargs,
     )
+
+
+def _stale_flow_history(tmp_path: Path) -> Path:
+    """Copy the real fixture history but backdate flow_alerts.json's
+    created_at well outside FlowTrigger's default 4h lookback — reproduces
+    the real captured-data shape (a single stale end-of-day snapshot) that
+    motivated bypass_flow_gate defaulting to True."""
+    dest = tmp_path / "history"
+    shutil.copytree(HISTORY_ROOT, dest)
+    for alerts_file in dest.glob("*/flow_alerts.json"):
+        data = json.loads(alerts_file.read_text())
+        for alert in data.get("data", []):
+            alert["created_at"] = "2025-12-25T14:30:00Z"  # days stale, any day
+        alerts_file.write_text(json.dumps(data))
+    return dest
 
 
 class TestRunOnce:
@@ -147,3 +163,45 @@ class TestRunOnce:
 
         assert state2.processed_dates == state1.processed_dates
         assert len(state2.records) == len(state1.records)
+
+
+class TestBypassFlowGate:
+    async def test_defaults_to_true_and_is_surfaced_in_results(self, tmp_path):
+        loop = _loop(tmp_path)
+        await loop.run_once()
+        results = json.loads((tmp_path / "backtest_results.json").read_text())
+        assert results["bypass_flow_gate"] is True
+
+    async def test_explicit_false_is_surfaced_in_results(self, tmp_path):
+        loop = _loop(tmp_path, bypass_flow_gate=False)
+        await loop.run_once()
+        results = json.loads((tmp_path / "backtest_results.json").read_text())
+        assert results["bypass_flow_gate"] is False
+
+    async def test_stale_flow_alerts_block_entry_when_not_bypassed(self, tmp_path):
+        # Reproduces the real captured-data shape: flow_alerts.json is a
+        # single end-of-day snapshot that can be well outside FlowTrigger's
+        # lookback window. Without bypass, this must reject every entry —
+        # exactly the bug that motivated bypass_flow_gate defaulting to True.
+        stale_history = _stale_flow_history(tmp_path)
+        loop = BacktestLoop(
+            history_dir=stale_history,
+            state_file=tmp_path / "state.json",
+            results_file=tmp_path / "results.json",
+            min_coverage_days=1,
+            bypass_flow_gate=False,
+        )
+        state = await loop.run_once()
+        assert len(state.records) == 0
+
+    async def test_same_stale_flow_alerts_allow_entry_when_bypassed(self, tmp_path):
+        stale_history = _stale_flow_history(tmp_path)
+        loop = BacktestLoop(
+            history_dir=stale_history,
+            state_file=tmp_path / "state.json",
+            results_file=tmp_path / "results.json",
+            min_coverage_days=1,
+            bypass_flow_gate=True,
+        )
+        state = await loop.run_once()
+        assert len(state.records) >= 1

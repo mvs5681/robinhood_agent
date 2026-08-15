@@ -1,5 +1,33 @@
 # Changelog
 
+## 2026-08-15 (bypass_flow_gate — real captured data always failed the flow gate)
+
+- **`BacktestLoop` produced zero simulated trades against the real 18-day
+  captured corpus — found by actually running it locally.** Root-caused
+  precisely: `data/history/2026-08-14/flow_alerts.json`'s captured alerts
+  are timestamped `2026-08-12` — a single end-of-day snapshot of "whatever
+  the UW feed currently returns" can be many hours (here, ~44h) stale
+  relative to the replay day, which is always outside `FlowTrigger`'s
+  default 4h lookback. Every candidate, every ticker, every day, rejected
+  at the flow gate — 100%, not reduced fidelity.
+  `BacktestLoop` gained `bypass_flow_gate: bool = True` (also
+  `BACKTEST_BYPASS_FLOW_GATE` env var in `run_live.py`), threaded to
+  `StandardPolicy`, same mechanism `scripts/fetch_polygon_history.py`'s
+  backtests already use. Verified against real data: 0 trades → 7 trades
+  (4 closed, win rate 50%) once bypassed. The dashboard now shows a visible
+  "Flow gate bypassed" warning badge plus an explanatory note whenever
+  `bypass_flow_gate` is active, so the simulated numbers are never mistaken
+  for a full-fidelity backtest — they reflect GEX regime + contract
+  selection + exit logic only, not the flow-confirmation edge the live
+  strategy also requires. Revisit once intraday flow-alert logging
+  (TODO.md) lands and captured flow data is no longer single-snapshot.
+- Note for anyone re-running `BacktestLoop` locally with a state file that
+  predates this change: already-`processed_dates` are never
+  re-evaluated — that's the incremental model working as designed (a
+  config change only affects days going forward), but it also means an old
+  state file won't retroactively pick up `bypass_flow_gate`. Delete
+  `backtest_state.json`/`backtest_results.json` to replay from scratch.
+
 ## 2026-08-15 (backtest-vs-reality dashboard tab)
 
 Goal: a daily, cumulative simulated track record that can be compared

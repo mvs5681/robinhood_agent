@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import random
 import sys
 import tempfile
@@ -350,14 +351,16 @@ async def main() -> None:
         telemetry_reader=tel_reader,
         cache=cache,
         position_store=position_store,
+        backtest_results_file=os.environ.get("BACKTEST_RESULTS_FILE", "data/backtest_results.json"),
     )
 
+    port = int(os.environ.get("PORT", "8080"))
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, "127.0.0.1", 8080)
+    site = web.TCPSite(runner, "127.0.0.1", port)
     await site.start()
 
-    url = "http://localhost:8080/"
+    url = f"http://localhost:{port}/"
     print(f"\nDashboard → {url}\nPress Ctrl+C to stop.\n")
     webbrowser.open(url)
 

@@ -334,6 +334,7 @@ tr:last-child td { border-bottom:none; }
 .sim-badge { display:inline-block; font-size:10px; font-weight:700; text-transform:uppercase;
              letter-spacing:.04em; color:var(--muted); border:1px solid var(--border);
              border-radius:4px; padding:1px 6px; margin-left:6px; vertical-align:middle; }
+.sim-badge.warn { color:var(--yellow); border-color:var(--yellow); }
 """
 
 # ---------------------------------------------------------------------------
@@ -1112,7 +1113,14 @@ async function loadBacktest() {
       (${bt.start_date} → ${bt.end_date}) · ${bt.tickers.length} ticker(s) ·
       $${bt.initial_capital.toLocaleString()} simulated capital
       <span class="sim-badge">Simulated — not real trades</span>
+      ${bt.bypass_flow_gate ? '<span class="sim-badge warn">Flow gate bypassed</span>' : ''}
     </div>
+    ${bt.bypass_flow_gate ? `<div class="backtest-meta" style="color:var(--yellow)">
+      Flow-confirmation gate is bypassed for this replay — captured flow alerts are a single
+      end-of-day snapshot and can be hours stale relative to the lookback window, so the gate
+      would otherwise reject nearly every candidate. These numbers reflect GEX regime + contract
+      selection + exit logic only, not the flow-confirmation edge the live strategy also requires.
+    </div>` : ''}
     <div class="backtest-delta-callout">${deltaMsg}</div>
     <div class="backtest-compare-grid">
       <div class="backtest-compare-col">

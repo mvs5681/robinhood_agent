@@ -144,6 +144,7 @@ def _build_display_payload(
     tickers: list[str],
     window_days: int,
     initial_capital: float,
+    bypass_flow_gate: bool,
 ) -> dict:
     all_time = compute_backtest_result(
         state.records, equity_curve=state.equity_curve, initial_capital=initial_capital,
@@ -168,6 +169,7 @@ def _build_display_payload(
         "end_date": end_date.isoformat(),
         "trading_days": len(state.processed_dates),
         "initial_capital": initial_capital,
+        "bypass_flow_gate": bypass_flow_gate,
         "all_time": _result_dict(all_time),
         "trailing_window": _result_dict(windowed),
         "trades": [_trade_dict(r) for r in recent_trades],
@@ -192,7 +194,20 @@ class BacktestLoop:
         max_concurrent_positions: int = 3,
         window_days: int = _WINDOW_DAYS,
         min_coverage_days: int = _MIN_COVERAGE_DAYS,
+        bypass_flow_gate: bool = True,
     ) -> None:
+        # Defaults to True: verified live that flow_alerts.json captures are
+        # a single end-of-day snapshot of "whatever's currently in the UW
+        # feed" — the alerts in a given day's capture can be many hours
+        # stale relative to that day's replay clock (confirmed: a 2026-08-14
+        # capture held alerts timestamped 2026-08-12), which is always
+        # outside FlowTrigger's default 4h lookback. Without bypassing,
+        # every candidate is rejected at the flow gate, every day, making
+        # the whole comparison feature produce zero simulated trades against
+        # real captured data. Bypassing tests GEX regime + selector + exit
+        # logic only — not the flow-confirmation edge — same tradeoff
+        # scripts/fetch_polygon_history.py's backtests already accept.
+        # Revisit once intraday flow-alert logging (TODO.md) lands.
         self._history_dir = Path(history_dir)
         self._state_file = Path(state_file)
         self._results_file = Path(results_file)
@@ -200,11 +215,12 @@ class BacktestLoop:
         self._max_concurrent_positions = max_concurrent_positions
         self._window_days = window_days
         self._min_coverage_days = min_coverage_days
+        self._bypass_flow_gate = bypass_flow_gate
 
     async def run(self) -> None:
         logger.info(
-            "BacktestLoop started — capital=$%.0f window=%dd min_coverage=%dd",
-            self._initial_capital, self._window_days, self._min_coverage_days,
+            "BacktestLoop started — capital=$%.0f window=%dd min_coverage=%dd bypass_flow_gate=%s",
+            self._initial_capital, self._window_days, self._min_coverage_days, self._bypass_flow_gate,
         )
         while True:
             secs = _seconds_until_next_run()
@@ -242,7 +258,7 @@ class BacktestLoop:
         start_date = available[0]
         end_date = date.today()
         harness = BacktestHarness(
-            policy=StandardPolicy(),
+            policy=StandardPolicy(bypass_flow_gate=self._bypass_flow_gate),
             data_store=store,
             start_date=start_date,
             end_date=end_date,
@@ -259,6 +275,7 @@ class BacktestLoop:
         payload = _build_display_payload(
             state, start_date=start_date, end_date=end_date, tickers=tickers,
             window_days=self._window_days, initial_capital=self._initial_capital,
+            bypass_flow_gate=self._bypass_flow_gate,
         )
         await asyncio.to_thread(self._persist_results, payload)
 

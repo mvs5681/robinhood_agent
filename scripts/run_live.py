@@ -44,6 +44,7 @@ from trader.live.cache import GEXCache
 from trader.live.capture_loop import CaptureLoop
 from trader.live.config import LiveConfig
 from trader.live.exit_loop import ExitLoop
+from trader.live.flow_capture import FlowAlertCapture
 from trader.live.notifier import TelegramNotifier
 from trader.live.order_manager import OrderLifecycleManager
 from trader.live.position_store import PositionStore
@@ -266,6 +267,7 @@ async def main() -> None:
         risk_engine=risk_engine,
         config=config,
         order_manager=order_manager,
+        flow_capture=FlowAlertCapture(history_dir=history_dir),
     )
 
     exit_loop = ExitLoop(

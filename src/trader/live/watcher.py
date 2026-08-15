@@ -33,6 +33,7 @@ from trader.telemetry.logger import TelemetryLogger
 from trader.uw.validators import parse_flow_alerts
 
 from .cache import GEXCache
+from .flow_capture import FlowAlertCapture
 from .market_hours import is_market_hours
 from .notifier import TelegramNotifier
 from .position_store import PositionStore, make_position
@@ -84,6 +85,7 @@ class FlowWatcher:
         risk_engine: RiskEngine | None = None,
         config: "LiveConfig | None" = None,
         order_manager: "OrderLifecycleManager | None" = None,
+        flow_capture: FlowAlertCapture | None = None,
     ) -> None:
         self.uw_tools = uw_tools
         self.cache = cache
@@ -105,6 +107,7 @@ class FlowWatcher:
         self._position_store = position_store
         self._config = config
         self._order_manager = order_manager
+        self._flow_capture = flow_capture
         # dedup by (ticker, expiry, strike, type, created_at) — dict preserves
         # insertion order so trimming drops the oldest keys, not arbitrary ones
         self._seen: dict[str, None] = {}
@@ -166,6 +169,13 @@ class FlowWatcher:
         if self.tel:
             self.tel.uw_fetch(endpoint="get_flow_alerts",
                               record_count=len(alerts), duration_ms=ms)
+
+        # Capture every fetched alert with its real timestamp, regardless of
+        # whether it's for a currently-cached ticker — this is the only
+        # source of genuine intraday flow timing for backtest replay, since
+        # get_flow_alerts has no historical date= filtering.
+        if self._flow_capture is not None:
+            self._flow_capture.record(alerts)
 
         new_alerts = self._filter_new(alerts)
         if not new_alerts:

@@ -33,6 +33,18 @@ record (see CHANGELOG 2026-08-15).
       against the real corpus that captured `flow_alerts.json` snapshots
       can be many hours stale relative to `FlowTrigger`'s 4h lookback,
       rejecting 100% of candidates without it. See CHANGELOG 2026-08-15.
+- [x] Capture intraday flow-alert timing — `FlowAlertCapture`, piggybacked
+      on `FlowWatcher`'s 60s poll, appends real-timestamped alerts to
+      `data/history/<date>/flow_alerts_intraday.jsonl`. See CHANGELOG
+      2026-08-15. Data starts accruing from deployment forward — the
+      once-daily `flow_alerts.json` snapshot can never be backfilled with
+      accurate intraday timing (current-data-only endpoint).
+- [ ] Consume `flow_alerts_intraday.jsonl` in `DataStore`/`BacktestHarness`
+      once enough days have accumulated, so the flow-confirmation gate can
+      be genuinely replayed instead of relying on `bypass_flow_gate`. Needs
+      `FlowTrigger`'s lookback check to filter the intraday log by real
+      `created_at` relative to each replay day's `as_of`, not just read a
+      single snapshot file.
 - [ ] Backfill as many past days as the API allows for the endpoints that
       support it, to widen the regime coverage faster than daily capture
       alone accumulates it.
@@ -51,18 +63,12 @@ record (see CHANGELOG 2026-08-15).
       other didn't at all. Also the natural home for entry-slippage
       tracking (quoted mid-price at proposal time vs. actual average fill
       premium) — currently uncaptured on the real side entirely.
-- [ ] Increase capture granularity beyond once-daily: hourly snapshots
-      (piggybacked on `GEXScanner`'s existing hourly refresh — zero extra
-      UW calls, just persisting more of what's already fetched) and an
-      append-only intraday flow-alert log (piggybacked on `FlowWatcher`'s
-      existing 60s poll) — flow alerts are current-data-only, so this is
-      the only way to ever recover real intraday flow timing for replay.
-      Would also raise the ceiling on how precise v2's matching above can be.
-      **No longer just a fidelity nice-to-have** — confirmed live that the
-      once-daily flow_alerts.json snapshot is stale enough to make
-      `FlowTrigger` reject 100% of candidates (see `bypass_flow_gate`
-      above); this is what actually removes the need for that workaround
-      and restores full-fidelity flow-gated backtesting.
+- [x] Intraday flow-alert log — done, see the `FlowAlertCapture` item above.
+- [ ] Increase capture granularity beyond once-daily for slow-moving GEX
+      data too: hourly snapshots piggybacked on `GEXScanner`'s existing
+      hourly refresh — zero extra UW calls, just persisting more of what's
+      already fetched. Would raise the ceiling on how precise v2's matching
+      above can be.
 
 ## Later / nice to have
 

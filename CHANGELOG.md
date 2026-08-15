@@ -1,5 +1,28 @@
 # Changelog
 
+## 2026-08-15 (capture intraday flow alerts — start collecting real timing)
+
+- **New `FlowAlertCapture`** (`src/trader/live/flow_capture.py`), piggybacked
+  on `FlowWatcher`'s existing 60s poll — zero extra UW API calls. Appends
+  every newly-seen flow alert (real `created_at` timestamp) to a per-day
+  `data/history/<date>/flow_alerts_intraday.jsonl` log, deduped by the same
+  `(ticker, expiry, strike, type, created_at)` composite key `FlowWatcher`
+  already uses internally for its own pipeline-trigger dedup. Captures
+  every fetched alert regardless of whether the ticker is in the current
+  GEX-cache universe — maximizes future backtest coverage, not just what
+  today's pipeline happens to act on.
+  Directly motivated by the `bypass_flow_gate` finding below: the once-daily
+  `flow_alerts.json` snapshot can be many hours stale by the time it's
+  captured (confirmed live — a 2026-08-14 capture held alerts timestamped
+  2026-08-12), which is why the backtest currently has to bypass the flow
+  gate entirely to produce any simulated trades. `get_flow_alerts` has no
+  historical `date=` filtering, so this intraday log is the only way to
+  ever recover real flow timing — every day without it is unrecoverable.
+  Consuming this log in `DataStore`/`BacktestHarness` to replace
+  `bypass_flow_gate` with genuine flow-gated replay is a separate,
+  deliberately deferred follow-up (needs several days of accumulated data
+  to be useful in the first place — see TODO.md).
+
 ## 2026-08-15 (bypass_flow_gate — real captured data always failed the flow gate)
 
 - **`BacktestLoop` produced zero simulated trades against the real 18-day

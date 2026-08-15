@@ -11,6 +11,7 @@ import pytest
 from trader.uw.mcp_config import load_uw_tools
 from trader.uw.validators import (
     parse_flow_alerts,
+    parse_interpolated_iv,
     parse_market_tide,
     parse_spot_gex_by_strike,
 )
@@ -60,3 +61,17 @@ async def test_spot_gex_live():
     assert len(strikes) > 0
     # Each strike has a price and at least one non-zero gamma field
     assert all(s.price > 0 for s in strikes)
+
+
+@pytest.mark.live
+async def test_interpolated_iv_live():
+    # Regression for the missing-allowlist-entry bug: get_interpolated_iv
+    # was fully wired downstream but never fetched because it wasn't in
+    # ALLOWED_TOOL_NAMES, so it silently never returned real data anywhere.
+    tools = await load_uw_tools()
+    tool_map = {t.name: t for t in tools}
+    assert "get_interpolated_iv" in tool_map
+    raw = await tool_map["get_interpolated_iv"].ainvoke({"ticker": "SPY"})
+    entries = parse_interpolated_iv(raw)
+    assert len(entries) > 0
+    assert all(0 <= e.percentile <= 100 for e in entries)

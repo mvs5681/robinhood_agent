@@ -28,6 +28,7 @@ ALLOWED_TOOL_NAMES: frozenset[str] = frozenset(
         # Ticker data
         "get_dark_pool_trades",
         "get_options_chain",
+        "get_interpolated_iv",
         "get_extended_technical_indicator",
         # Screener
         "get_options_screener",

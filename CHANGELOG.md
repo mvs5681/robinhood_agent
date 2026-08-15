@@ -1,5 +1,29 @@
 # Changelog
 
+## 2026-08-15 (fix: get_interpolated_iv never actually fetched)
+
+- **`interpolated_iv` has been silently empty for every ticker, every day,
+  in both live trading and every captured backtest fixture — found while
+  scoping how to backtest against `data/history/`.** The feature was fully
+  built: `InterpolatedIVEntry` schema, `parse_interpolated_iv` validator,
+  `TickerSnapshot.interpolated_iv` field, `iv_cost_score()` consumer (20% of
+  the blend composite weight), the `state_capture.py` serializer, and the
+  backtest mock tools all exist and are correct. But `get_interpolated_iv`
+  was never added to `ALLOWED_TOOL_NAMES` in `trader/uw/mcp_config.py`, so
+  the MCP client filtered it out before `scanner.py` ever had a tool handle
+  to call — `_scan_ticker()` had no fetch call for it at all. `iv_cost_score()`
+  degrades gracefully to a neutral `0.5` on empty input, so this didn't crash
+  or bias anything — it just meant the IV-cost dimension of scoring
+  contributed zero real signal since the scanner was first written.
+  Fixed by adding `get_interpolated_iv` to `ALLOWED_TOOL_NAMES` and wiring
+  the fetch call into `_scan_ticker()`, in the fetch order the module's own
+  docstring always claimed ("spot GEX, darkpool, net-prem ticks, option
+  contracts, IV, technicals"). Per `fetch_history.py`'s documented UW
+  endpoint coverage, `interpolated-iv` isn't in the list of endpoints that
+  support historical `date=` filtering, so this only benefits captures going
+  forward — the 18 days already in `data/history/` will likely stay
+  IV-blind permanently.
+
 ## 2026-08-15 (full bug-class audit — order-adoption silent gap, risk-check bypass)
 
 Follow-up to the reconciliation and kill-switch bugs below: rather than wait

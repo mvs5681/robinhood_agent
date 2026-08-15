@@ -8,9 +8,15 @@ avg P&L, and drawdown per regime/setup type. The harness works
 
 - [ ] Check what historical data the UW subscription exposes (flow alerts,
       GEX by strike, darkpool, option chains — how far back, which endpoints)
-- [ ] Build a daily capture job that snapshots the live UW responses the
-      pipeline consumes into `tests/fixtures/history/<date>/` format
-      (or a dedicated `data/history/` dir) so replay data accrues going forward
+- [x] Build a daily capture job that snapshots the live UW responses the
+      pipeline consumes into `data/history/<date>/` — `CaptureLoop` +
+      `StateCaptureLoop`, both wired into `run_live.py`, firing at 4:30pm ET.
+      18 trading days accumulated so far (2026-07-22 → 2026-08-14).
+- [x] Fix `get_interpolated_iv` never being fetched — missing from
+      `ALLOWED_TOOL_NAMES`, so `interpolated_iv` was silently empty in every
+      live scan and every captured fixture, permanently. See CHANGELOG
+      2026-08-15. Captures from now on will have real IV data; the 18 days
+      already on disk likely can't be backfilled (current-data-only endpoint).
 - [ ] Backfill as many past days as the API allows
 - [ ] Run the harness over the accumulated history; review metrics by regime
       and setup type (`by_regime`, `by_setup_type` in `BacktestResult`)

@@ -1,5 +1,5 @@
 """
-Unit tests for the LangGraph agent graph using MockUWTools.
+Unit tests for the LangGraph agent graph using ad hoc mock tool fixtures.
 No network I/O — all data sourced from fixtures.
 """
 
@@ -10,7 +10,6 @@ import pytest
 
 from trader.graph.agent import build_graph, run_pipeline
 from trader.graph.state import TradingAgentState
-from trader.uw.mock_tools import MockUWTools
 
 FIXTURES = Path(__file__).parent.parent / "fixtures"
 
@@ -74,9 +73,9 @@ class TestBuildGraph:
         tools = [
             broken_tool,
             _make_mock_tool("get_flow_alerts", {"data": []}),
-            _make_mock_tool("get_spot_exposures_by_strike", {"data": []}),
-            _make_mock_tool("get_darkpool_ticker", {"data": []}),
-            _make_mock_tool("get_net_prem_ticks", {"data": []}),
+            _make_mock_tool("get_greek_exposure_by_strike", {"data": []}),
+            _make_mock_tool("get_dark_pool_trades", {"data": []}),
+            _make_mock_tool("get_flow_per_strike", {"data": []}),
         ]
         state = await run_pipeline(["AAPL"], tools)
         assert any("market_tide" in e for e in state.errors)

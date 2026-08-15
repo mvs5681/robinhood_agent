@@ -1,5 +1,26 @@
 # Changelog
 
+## 2026-08-15 (clean up orphaned MockUWTools mock module)
+
+- **Removed `src/trader/uw/mock_tools.py` and its dedicated test file** —
+  found while fixing the `get_spot_exposures_by_strike` tool-name drift
+  below: this whole `MockUWTools` class was dead code. It was imported in
+  `test_agent_graph.py` but never actually instantiated there (that file's
+  real tests use ad hoc `MagicMock` tool fixtures instead), leaving it
+  exercised only by its own `test_mock_tools.py`. Its method names had
+  drifted heavily from the real production tool names it was meant to
+  mirror — 6 of its ~11 methods (`get_stock_flow_alerts`,
+  `get_darkpool_ticker`, `get_net_prem_ticks`, `get_option_contracts`,
+  `get_greeks`, `get_technical_indicator`, `get_option_contracts_screener`)
+  don't match anything in `ALLOWED_TOOL_NAMES`. The real backtest harness
+  has used `BacktestDataSlice`/`DataStore` for this purpose since Phase 8;
+  this module predates that and was never cleaned up.
+  Also fixed the same tool-name drift in `test_agent_graph.py`'s
+  `test_pipeline_errors_do_not_crash` (ad hoc tool list used 3 names that
+  don't exist in production — didn't affect what the test actually
+  asserted, but was misleading) and a cosmetic label in
+  `scripts/demo_dashboard.py`'s synthetic telemetry generator.
+
 ## 2026-08-15 (fix: get_interpolated_iv never actually fetched)
 
 - **`interpolated_iv` has been silently empty for every ticker, every day,

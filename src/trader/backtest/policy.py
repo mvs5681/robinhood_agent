@@ -21,13 +21,18 @@ from typing import TYPE_CHECKING
 from trader.contracts.selector import SelectorParams
 from trader.executor.schemas import ExecutionMode
 from trader.exits.monitor import ExitMonitor
-from trader.exits.schemas import ExitSignal
+from trader.exits.schemas import ExitContext, ExitSignal
 from trader.gex.detector import GEXDetector
 from trader.gex.schemas import GEXDetectorParams, GEXSetup
 from trader.graph.agent import run_pipeline
 from trader.risk.schemas import RiskParams
 from trader.scoring.schemas import CandidateSignal
-from trader.uw.validators import parse_spot_gex_by_strike
+from trader.uw.schemas import SpotGEXByStrike
+from trader.uw.validators import (
+    parse_interpolated_iv,
+    parse_spot_gex_by_strike,
+    parse_technical_indicator,
+)
 
 from .data_store import BacktestDataSlice
 from .schemas import BacktestPosition
@@ -139,7 +144,9 @@ class StandardPolicy(PolicyAdapter):
 
         as_of = datetime.combine(data_slice.date, time(16, 0), tzinfo=timezone.utc)
 
-        current_setup = self._current_gex_setup(position.ticker, current_price, data_slice)
+        spot_gex = self._parse_spot_gex(position.ticker, data_slice)
+        current_setup = self._current_gex_setup(position.ticker, current_price, spot_gex)
+        context = self._current_exit_context(position.ticker, spot_gex, data_slice)
 
         return self._exit_monitor.evaluate(
             position.as_exit_position(),
@@ -148,24 +155,58 @@ class StandardPolicy(PolicyAdapter):
             dte=dte,
             as_of=as_of,
             current_setup=current_setup,
+            context=context,
         )
+
+    @staticmethod
+    def _parse_spot_gex(ticker: str, data_slice: BacktestDataSlice) -> list[SpotGEXByStrike]:
+        raw = data_slice.spot_gex_raw.get(ticker)
+        if not raw:
+            return []
+        try:
+            return parse_spot_gex_by_strike(raw)
+        except Exception:
+            return []
 
     def _current_gex_setup(
         self,
         ticker: str,
         spot_price: Decimal,
-        data_slice: BacktestDataSlice,
+        spot_gex: list[SpotGEXByStrike],
     ) -> GEXSetup | None:
         """Re-derive the live GEXSetup for this day, the backtest analogue of
         ExitLoop._current_gex_setup(). Lets THESIS_INVALIDATED fire in replay
         the same way it does live, instead of being structurally unreachable."""
-        raw = data_slice.spot_gex_raw.get(ticker)
-        if not raw:
+        if not spot_gex:
             return None
         try:
-            spot_gex = parse_spot_gex_by_strike(raw)
-            if not spot_gex:
-                return None
             return self._detector.detect(ticker, spot_gex, spot_price)
         except Exception:
             return None
+
+    @staticmethod
+    def _current_exit_context(
+        ticker: str,
+        spot_gex: list[SpotGEXByStrike],
+        data_slice: BacktestDataSlice,
+    ) -> ExitContext:
+        """Backtest analogue of ExitLoop._current_exit_context() — built from
+        the same captured fixtures the entry pipeline already reads, so it's
+        available for every historical day with no new capture work."""
+        interpolated_iv = []
+        try:
+            iv_raw = data_slice.interpolated_iv_raw.get(ticker)
+            if iv_raw:
+                interpolated_iv = parse_interpolated_iv(iv_raw)
+        except Exception:
+            pass
+
+        technicals: dict[str, list] = {}
+        for fn in ("RSI", "MACD"):
+            try:
+                raw = data_slice.technicals_raw.get(ticker, {}).get(fn)
+                technicals[fn] = parse_technical_indicator(raw, fn) if raw else []
+            except Exception:
+                technicals[fn] = []
+
+        return ExitContext(spot_gex=spot_gex, interpolated_iv=interpolated_iv, technicals=technicals)

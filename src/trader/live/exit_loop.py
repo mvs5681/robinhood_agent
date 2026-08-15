@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING
 from uuid import NAMESPACE_OID, uuid5
 
 from trader.exits.monitor import ExitMonitor
-from trader.exits.schemas import ExitReason, ExitSignal, Position
+from trader.exits.schemas import ExitContext, ExitReason, ExitSignal, Position
 from trader.executor.schemas import ExecutionMode
 from trader.rh.mcp_config import rh_call
 from trader.rh.ticks import round_price_to_tick
@@ -157,7 +157,10 @@ class ExitLoop:
             await self._store.add(pos)
 
         current_setup = await self._current_gex_setup(pos.ticker)
-        signal = self._monitor.evaluate(pos, spot, premium, dte, current_setup=current_setup)
+        context = await self._current_exit_context(pos.ticker)
+        signal = self._monitor.evaluate(
+            pos, spot, premium, dte, current_setup=current_setup, context=context
+        )
         if signal:
             extra = ""
             if signal.reason == ExitReason.THESIS_INVALIDATED and current_setup is not None:
@@ -167,7 +170,7 @@ class ExitLoop:
                 "Exit triggered %s reason=%s pnl=%.1f%% spot=%s premium=%s dte=%d%s",
                 pos.ticker, signal.reason.value, signal.pnl_pct * 100, spot, premium, dte, extra,
             )
-            await self._execute_exit(pos, signal)
+            await self._execute_exit(pos, signal, context)
 
     async def _current_gex_setup(self, ticker: str):
         """Live GEXSetup for thesis-invalidation checks, or None if unavailable
@@ -180,11 +183,30 @@ class ExitLoop:
             return None
         return snap.gex_setup
 
+    async def _current_exit_context(self, ticker: str) -> ExitContext | None:
+        """Live IV/technicals/gamma-ladder context for dynamic exit rules, or
+        None under the same availability/staleness rule as _current_gex_setup —
+        the scanner already refreshes this hourly for any held ticker (kept in
+        the discovery universe for exactly this reason), so a stale cache
+        means these signals shouldn't drive a decision either."""
+        if self._cache is None:
+            return None
+        snap = await self._cache.snapshot(ticker)
+        if snap is None or snap.is_stale:
+            return None
+        return ExitContext(
+            spot_gex=snap.spot_gex,
+            interpolated_iv=snap.interpolated_iv,
+            technicals=snap.technicals,
+        )
+
     # ------------------------------------------------------------------
     # Order placement
     # ------------------------------------------------------------------
 
-    async def _execute_exit(self, pos: Position, signal: ExitSignal) -> None:
+    async def _execute_exit(
+        self, pos: Position, signal: ExitSignal, context: ExitContext | None = None
+    ) -> None:
         t0 = _time.monotonic()
         order_id: str | None = None
         dry_run = self._mode == ExecutionMode.PROPOSE_ONLY or not self._rh_tools
@@ -237,6 +259,9 @@ class ExitLoop:
 
         ms = round((_time.monotonic() - t0) * 1000, 1)
         if self._tel:
+            iv_pct = context.iv_percentile_at(signal.dte_remaining) if context else None
+            rsi = context.rsi_latest() if context else None
+            macd_hist = context.macd_histogram_latest() if context else None
             self._tel.exit_signal(
                 ticker=pos.ticker,
                 position_id=pos.position_id,
@@ -249,6 +274,9 @@ class ExitLoop:
                 quantity=pos.quantity,
                 entry_regime=pos.entry_regime,
                 entry_setup_type=pos.entry_setup_type,
+                iv_percentile=float(iv_pct) if iv_pct is not None else None,
+                rsi=float(rsi) if rsi is not None else None,
+                macd_histogram=float(macd_hist) if macd_hist is not None else None,
             )
 
         if self._notifier:

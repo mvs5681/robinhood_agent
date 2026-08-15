@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
-from .schemas import ExitReason, ExitSignal, Position
+from .schemas import ExitContext, ExitReason, ExitSignal, Position
 
 if TYPE_CHECKING:
     from trader.gex.schemas import GEXSetup
@@ -68,8 +68,11 @@ class ExitMonitor:
         dte: int,
         as_of: datetime | None = None,
         current_setup: "GEXSetup | None" = None,
+        context: ExitContext | None = None,
     ) -> ExitSignal | None:
-        reason = self._first_triggered(position, current_price, current_premium, dte, current_setup)
+        reason = self._first_triggered(
+            position, current_price, current_premium, dte, current_setup, context
+        )
         if reason is None:
             return None
 
@@ -100,6 +103,7 @@ class ExitMonitor:
         current_premium: Decimal,
         dte: int,
         current_setup: "GEXSetup | None" = None,
+        context: ExitContext | None = None,
     ) -> ExitReason | None:
         if position.target_level is not None:
             target = position.target_level

@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from trader.exits.monitor import ExitMonitor
-from trader.exits.schemas import ExitReason, Position
+from trader.exits.schemas import ExitContext, ExitReason, Position
 from trader.executor.schemas import ExecutionMode
 from trader.gex.schemas import GEXRegime, GEXSetup
 from trader.live.cache import GEXCache, TickerSnapshot
@@ -106,6 +106,45 @@ class TestCurrentGexSetup:
         cache = await _cache_with("AAPL", _setup(direction="put"), stale=True)
         loop = _loop(cache=cache)
         assert await loop._current_gex_setup("AAPL") is None
+
+
+class TestCurrentExitContext:
+    async def test_returns_none_when_no_cache_wired(self):
+        loop = _loop(cache=None)
+        assert await loop._current_exit_context("AAPL") is None
+
+    async def test_returns_none_when_ticker_not_cached(self):
+        cache = GEXCache()
+        loop = _loop(cache=cache)
+        assert await loop._current_exit_context("AAPL") is None
+
+    async def test_returns_none_when_stale(self):
+        cache = await _cache_with("AAPL", _setup(), stale=True)
+        loop = _loop(cache=cache)
+        assert await loop._current_exit_context("AAPL") is None
+
+    async def test_returns_context_carrying_cached_signals_when_fresh(self):
+        from trader.uw.schemas import InterpolatedIVEntry, SpotGEXByStrike, TechnicalPoint
+
+        cache = GEXCache()
+        snap = TickerSnapshot(
+            gex_setup=_setup(),
+            spot_gex=[SpotGEXByStrike(price=Decimal("200"), call_gamma_oi=Decimal("100"),
+                                       put_gamma_oi=Decimal("-50"))],
+            interpolated_iv=[InterpolatedIVEntry(days=7, volatility=Decimal("0.3"),
+                                                  percentile=Decimal("62"))],
+            technicals={"RSI": [TechnicalPoint(timestamp="2026-08-14", value=Decimal("55"))]},
+        )
+        snap.refreshed_at = datetime.now(timezone.utc)
+        await cache.update([], {"AAPL": snap})
+        loop = _loop(cache=cache)
+
+        context = await loop._current_exit_context("AAPL")
+
+        assert context is not None
+        assert len(context.spot_gex) == 1
+        assert context.iv_percentile_at(7) == Decimal("62")
+        assert context.rsi_latest() == Decimal("55")
 
 
 def _sequential_quote_tool(marks: list[str]) -> MagicMock:

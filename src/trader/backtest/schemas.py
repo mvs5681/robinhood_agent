@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     from trader.exits.schemas import ExitSignal
+    from trader.gex.schemas import GEXSetup
     from trader.scoring.schemas import CandidateSignal
     from trader.uw.schemas import OptionContract
 
@@ -27,6 +28,8 @@ class BacktestPosition:
     peak_premium: Decimal | None = None  # highest premium observed since entry —
                                          # updated by the harness each simulated day,
                                          # mirrors ExitLoop's live tracking
+    entry_gex_setup: "GEXSetup | None" = None  # GEXSetup snapshotted at entry —
+                                                # thesis-confidence-decay's "then" side
 
     @property
     def entry_cost(self) -> Decimal:
@@ -46,6 +49,7 @@ class BacktestPosition:
             opened_at=datetime.combine(self.opened_on, time(9, 30), tzinfo=timezone.utc),
             sector=self.sector,
             peak_premium=self.peak_premium,
+            entry_gex_setup=self.entry_gex_setup,
         )
 
     @classmethod
@@ -64,6 +68,7 @@ class BacktestPosition:
             target_level=target,
             opened_on=entry_date,
             contracts=contracts,
+            entry_gex_setup=candidate.gex_setup,
         )
 
 

@@ -525,10 +525,12 @@ class OrderLifecycleManager:
         target = None
         regime = None
         setup_type = None
+        entry_gex_setup = None
         if wo.candidate is not None and wo.candidate.gex_setup is not None:
             target = wo.candidate.gex_setup.target_level
             regime = wo.candidate.gex_setup.regime.value
             setup_type = wo.candidate.gex_setup.setup_type
+            entry_gex_setup = wo.candidate.gex_setup
         pos = Position(
             position_id=wo.order_id,
             ticker=wo.ticker,
@@ -540,6 +542,7 @@ class OrderLifecycleManager:
             option_instrument_id=wo.option_id,
             entry_regime=regime,
             entry_setup_type=setup_type,
+            entry_gex_setup=entry_gex_setup,
         )
         await self._store.add(pos)
         logger.info("FILLED %s x%d @ %s — position tracked (%s)",

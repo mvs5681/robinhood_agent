@@ -149,3 +149,55 @@ class TestTrailingStopReachableInBacktest:
         contract = _contract(type_="call")
         position = _position(contract, peak_premium=Decimal("7.25"))
         assert position.as_exit_position().peak_premium == Decimal("7.25")
+
+
+class TestEntryGexSetupSnapshot:
+    def test_from_candidate_captures_entry_gex_setup(self):
+        from datetime import datetime, timezone
+
+        from trader.gex.schemas import GEXRegime, GEXSetup
+        from trader.scoring.schemas import BlendScores, CandidateSignal
+
+        contract = _contract(type_="call")
+        setup = GEXSetup(
+            ticker=TICKER, as_of=datetime(2026, 1, 2, 14, 0, tzinfo=timezone.utc),
+            spot_price=Decimal("100"), regime=GEXRegime.POSITIVE, flip_point=None,
+            nearest_call_wall=None, nearest_put_wall=None, target_level=Decimal("110"),
+            candidate_direction="call", setup_type="pin", structure_confidence=0.7,
+            raw_gex_by_strike=[],
+        )
+        candidate = CandidateSignal(
+            ticker=TICKER, as_of=setup.as_of, gex_setup=setup,
+            blend_scores=BlendScores(market_tide=0.7, darkpool=0.8, flow_pressure=0.7,
+                                      iv_cost=0.6, technicals=0.75, composite=0.71),
+            execution_status="proposed", selected_contract=contract,
+        )
+
+        position = BacktestPosition.from_candidate(candidate, date(2026, 1, 2))
+
+        assert position.entry_gex_setup is setup
+        assert position.as_exit_position().entry_gex_setup is setup
+
+
+class TestBacktestExitContext:
+    def test_current_exit_context_carries_iv_and_technicals(self):
+        policy = StandardPolicy()
+        contract = _contract(type_="call")
+        data_slice = BacktestDataSlice(
+            date=date(2026, 1, 5), tickers=[TICKER],
+            spot_gex_raw={TICKER: _spot_gex_raw_favoring_put(Decimal("100"))},
+            interpolated_iv_raw={TICKER: {"data": [
+                {"days": 7, "volatility": "0.35", "percentile": "48"},
+            ]}},
+            technicals_raw={TICKER: {
+                "RSI": {"data": [{"timestamp": "2026-01-05", "RSI": "61.2"}]},
+                "MACD": {"data": [{"timestamp": "2026-01-05", "macd": "0.4",
+                                    "signal": "0.3", "histogram": "0.1"}]},
+            }},
+        )
+
+        spot_gex = policy._parse_spot_gex(TICKER, data_slice)
+        context = policy._current_exit_context(TICKER, spot_gex, data_slice)
+
+        assert context.iv_percentile_at(7) == Decimal("48")
+        assert context.rsi_latest() == Decimal("61.2")

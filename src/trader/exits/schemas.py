@@ -4,9 +4,10 @@ from datetime import datetime
 from decimal import Decimal
 from enum import Enum
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
-from trader.uw.schemas import OptionContract
+from trader.gex.schemas import GEXSetup
+from trader.uw.schemas import InterpolatedIVEntry, OptionContract, SpotGEXByStrike, TechnicalPoint
 
 
 class ExitReason(str, Enum):
@@ -38,6 +39,49 @@ class Position(BaseModel):
     # same way backtest trades already are, for backtest-vs-reality comparison.
     entry_regime: str | None = None
     entry_setup_type: str | None = None
+    entry_gex_setup: GEXSetup | None = None  # GEXSetup snapshotted at fill time — the
+                                              # "then" side of the thesis-confidence-decay
+                                              # drift check (None for reconciled/adopted
+                                              # positions that never went through the
+                                              # pipeline, same as target_level)
+
+
+class ExitContext(BaseModel):
+    """
+    Live market context fetched fresh each tick, for exit rules that need more
+    than spot/premium/dte — the dynamic signals a static threshold can't see.
+
+    Everything here is best-effort: missing/empty means "not available this
+    tick" (stale cache, thin data), never an error. Distinct from
+    current_setup (already a direct evaluate() argument, unchanged) — this
+    carries the raw signals current_setup is built from, plus IV/technicals,
+    for gates that need more than the coarse regime/direction call.
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    spot_gex: list[SpotGEXByStrike] = Field(default_factory=list)
+    interpolated_iv: list[InterpolatedIVEntry] = Field(default_factory=list)
+    technicals: dict[str, list["TechnicalPoint"]] = Field(default_factory=dict)
+
+    def iv_percentile_at(self, dte: int) -> Decimal | None:
+        """IV percentile (0-100) at the interpolated-IV horizon closest to dte."""
+        if not self.interpolated_iv:
+            return None
+        closest = min(self.interpolated_iv, key=lambda e: abs(e.days - dte))
+        return closest.percentile
+
+    def rsi_latest(self) -> Decimal | None:
+        rows = self.technicals.get("RSI")
+        if not rows:
+            return None
+        return sorted(rows, key=lambda r: r.timestamp)[-1].value
+
+    def macd_histogram_latest(self) -> Decimal | None:
+        rows = self.technicals.get("MACD")
+        if not rows:
+            return None
+        return sorted(rows, key=lambda r: r.timestamp)[-1].histogram
 
 
 class ExitSignal(BaseModel):

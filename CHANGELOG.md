@@ -1,5 +1,45 @@
 # Changelog
 
+## 2026-08-15 (kill-switch stayed tripped for two weeks — day rollover fix)
+
+- **Root cause of "no trades in 2 weeks"**: the July 30 reconciliation fix
+  (below) correctly closed 3 previously-unprotected, deeply-underwater
+  positions on its first tick (CRWV `thesis_invalidated` −50.5%, IWM
+  `stop_loss` −64.5%, SMCI `stop_loss` −65.7%), realizing a combined −$772
+  loss that correctly tripped the 5%-of-NAV daily-loss kill-switch — the
+  risk system working exactly as designed. But `RiskEngine`'s documented
+  "resets at midnight UTC" only ran inside `_load_state()`, called once at
+  `__init__` — a long-running container that never restarts never
+  re-evaluates it. Since nothing restarted the container in the two weeks
+  since, the kill-switch stayed latched in memory the entire time: every
+  single `risk_check` since (1,658 of them, 100%) was rejected with
+  `kill_switch_active: daily loss limit reached`, and zero `order_attempt`
+  events occurred in that window — a one-day circuit breaker silently
+  became an indefinite full halt.
+  `RiskEngine` now checks for a day rollover (`_maybe_roll_day()`) at the
+  top of every `check()` and `record_pnl()` call, not only at startup —
+  daily P&L and the kill-switch reset live within one call of UTC midnight,
+  no restart required. Open positions and sector counts are untouched by a
+  rollover (not daily-scoped). New tests in `TestKillSwitchDayRollover`
+  cover the reset itself, that it persists to disk, that open positions
+  survive it, and that a fresh bad day can retrip it afterward.
+- **Fixed real (non-flaky) test isolation in `test_risk_engine.py`** — every
+  test constructed a bare `RiskEngine()` with no explicit `state_file`,
+  so all of them read/wrote the *real* `logs/risk_state.json`. This was
+  calendar-dependent flakiness, not a hypothetical: earlier the same day
+  the production kill-switch tripped, this suite's `RiskEngine()` calls
+  silently loaded that real trip (persisted date happened to match "today"
+  at the time), failing ~10 tests that expected a clean engine — exactly
+  the failures tracked as "pre-existing, unrelated" throughout this
+  session. New autouse fixture monkeypatches the module's default state
+  path to a per-test `tmp_path`, isolating every existing call site with
+  no changes to the test bodies themselves.
+- Also fixed a hardcoded near-term contract expiry in `test_exit_loop.py`
+  that had gone stale as real time caught up to it, spuriously triggering
+  `dte_stop` in tests that expected no exit — same underlying bug class
+  (state/fixtures that silently go stale with time) in test code instead
+  of production code.
+
 ## 2026-07-30 (the real reconciliation bug: missing instrument enrichment)
 
 - **Fix the actual root cause behind "no open positions found" — found by

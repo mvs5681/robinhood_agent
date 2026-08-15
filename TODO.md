@@ -41,11 +41,15 @@ avg P&L, and drawdown per regime/setup type. The harness works
       code-complete (`SECTOR_MAP_FILE` env var, `sector_map.example.json`) —
       still needs a real `sector_map.json` populated and deployed for the
       gate to actually activate; currently inactive with no map on disk.
-- [ ] Fix test isolation in `test_risk_engine.py` — `RiskEngine` persists to
-      `logs/risk_state.json` by default (real path, not a temp dir), so
-      running the suite locally leaves real state on disk that leaks across
-      runs/dates and causes ~10 kill-switch/sector tests to fail
-      intermittently. Tests should pass an explicit `tmp_path` state file.
+- [x] Fix test isolation in `test_risk_engine.py` — autouse fixture now
+      monkeypatches the default state path to a per-test `tmp_path`. This
+      was genuinely flaky, not hypothetical: it silently loaded the real
+      production kill-switch trip into "clean" test engines whenever the
+      persisted date happened to match test-run day.
+- [x] Fix the kill-switch itself staying tripped for two weeks straight —
+      `_maybe_roll_day()` now checks for a day rollover live, on every
+      `check()`/`record_pnl()`, not only at `RiskEngine.__init__`. See
+      CHANGELOG 2026-08-15.
 - [ ] Exit loop currently checks thesis invalidation via a simple
       direction-flip rule (live `candidate_direction` vs. the held contract's
       type). Consider also comparing wall distance/structure confidence

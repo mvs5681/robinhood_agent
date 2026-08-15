@@ -1,5 +1,38 @@
 # Changelog
 
+## 2026-08-15 (full bug-class audit — order-adoption silent gap, risk-check bypass)
+
+Follow-up to the reconciliation and kill-switch bugs below: rather than wait
+for the next one to surface live, audited the codebase for the same three
+bug classes (startup-only state, API field misassumptions, silent-empty
+results) plus a fourth (guards that don't apply uniformly across all three
+execution modes). Two real, unfixed bugs came out of it:
+
+- **`OrderLifecycleManager.adopt_working_orders()` had the exact same
+  silent-empty gap the reconciler had before its fix.** A false "0 orders to
+  adopt" at startup — from a parse miss rather than genuine emptiness — was
+  indistinguishable from the common, legitimate case: no log line either
+  way. An already-placed, already-paying order would go completely
+  unmonitored (no reprice, no give-up, never promoted to a tracked position)
+  for the container's entire lifetime, with no trail to diagnose it after
+  the fact. Now retries the full 4-state sweep once after a short delay and
+  logs the raw per-state responses on a final zero, mirroring the
+  reconciler's fix.
+- **`risk_engine.check()` was never re-verified at the moment of placement
+  for delayed-approval order flows.** `Executor` held no reference to the
+  risk engine at all — `check()` runs exactly once, at proposal creation,
+  inside the graph's `risk_gate()` node. For `autonomous` mode that's
+  effectively atomic with placement, but `rh_approval` mode's real
+  production path — a human tapping Approve in Telegram or the dashboard,
+  arbitrarily long after the proposal was created — calls
+  `execute_approved()`, which places without ever re-checking the risk
+  gate. A kill-switch trip (or a position-cap/sector-cap breach) between
+  proposal and approval did not block the placement. `Executor` now takes
+  an optional `risk_engine` and re-verifies `check()` immediately before
+  `place_option_order` in both `_autonomous()` (covering
+  `execute_approved()`, which routes through it) and `_rh_approval()`'s own
+  interrupt-resume placement path.
+
 ## 2026-08-15 (kill-switch stayed tripped for two weeks — day rollover fix)
 
 - **Root cause of "no trades in 2 weeks"**: the July 30 reconciliation fix

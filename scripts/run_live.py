@@ -221,6 +221,7 @@ async def main() -> None:
         quantity=int(os.environ.get("ORDER_QUANTITY", "1")),
         max_trade_spend=max_trade_spend,
         max_contracts=int(os.environ.get("MAX_CONTRACTS", "20")),
+        risk_engine=risk_engine,
     )
 
     scanner = GEXScanner(

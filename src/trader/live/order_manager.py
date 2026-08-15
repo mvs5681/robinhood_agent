@@ -218,8 +218,32 @@ class OrderLifecycleManager:
         pending_cancelled would leave contracts that already cost real money
         completely unmonitored (no stop-loss/DTE/exit) until the order
         eventually resolves on its own.
+
+        Same class of gap the reconciler had: a false "0 orders" here — from
+        a parse miss rather than genuine emptiness — is indistinguishable
+        from the common, legitimate case with no logging at all. Retried
+        once after a short delay, and the raw per-state responses are logged
+        on a final zero so a real occurrence is diagnosable from container
+        logs instead of silently leaving an already-placed order unmonitored.
         """
+        adopted, raw_by_state = await self._sweep_adoptable_orders()
+        if adopted == 0:
+            logger.info("adopt_working_orders: 0 adopted on first sweep — retrying once")
+            await asyncio.sleep(3)
+            adopted, raw_by_state = await self._sweep_adoptable_orders()
+
+        if adopted:
+            logger.warning("Adopted %d working order(s) from before restart", adopted)
+        else:
+            logger.info(
+                "adopt_working_orders: 0 orders adopted after retry — raw responses: %s",
+                {state: str(raw)[:300] for state, raw in raw_by_state.items()},
+            )
+        return adopted
+
+    async def _sweep_adoptable_orders(self) -> tuple[int, dict[str, object]]:
         adopted = 0
+        raw_by_state: dict[str, object] = {}
         for state in self._ADOPTABLE_STATES:
             try:
                 result = await rh_call(self._rh_tools, "get_option_orders", {
@@ -230,12 +254,11 @@ class OrderLifecycleManager:
             except Exception as exc:
                 logger.error("adopt_working_orders(%s) failed: %s", state, exc)
                 continue
+            raw_by_state[state] = result
             for order in _list_orders(result):
                 if await self._adopt_one(order, state):
                     adopted += 1
-        if adopted:
-            logger.warning("Adopted %d working order(s) from before restart", adopted)
-        return adopted
+        return adopted, raw_by_state
 
     async def _adopt_one(self, order: dict, state: str) -> bool:
         order_id = order.get("id")

@@ -21,6 +21,7 @@ from langgraph.types import interrupt
 
 from trader.rh.mcp_config import rh_call
 from trader.rh.ticks import round_price_to_tick
+from trader.risk.engine import RiskEngine
 from trader.scoring.schemas import CandidateSignal
 from trader.uw.schemas import OptionContract
 
@@ -106,6 +107,7 @@ class Executor:
         quantity: int = 1,
         max_trade_spend: Decimal | None = None,
         max_contracts: int = 20,
+        risk_engine: RiskEngine | None = None,
     ) -> None:
         self.mode = mode
         self.account_number = account_number
@@ -113,6 +115,9 @@ class Executor:
         self.quantity = quantity
         self._max_trade_spend = max_trade_spend
         self._max_contracts = max_contracts
+        # Re-verified immediately before placement — see _check_risk. Optional
+        # so unit tests / propose_only setups aren't forced to wire one.
+        self._risk_engine = risk_engine
 
     def calc_quantity(self, mid: Decimal) -> int:
         """Return contracts to buy given the option mid price.
@@ -265,6 +270,24 @@ class Executor:
             params["ref_id"] = request.ref_id
         return params
 
+    def _check_risk(self, candidate: CandidateSignal) -> str | None:
+        """Re-verify the risk gate immediately before placement.
+
+        risk_gate() in the graph pipeline only runs once, at proposal
+        creation. For autonomous mode that's placed in the same call, so the
+        gap is negligible — but rh_approval placement (both the LangGraph
+        interrupt path here and the Telegram/dashboard execute_approved()
+        path) can be arbitrarily delayed behind a human tapping Approve.
+        A kill-switch trip, position-cap breach, or sector-cap breach in
+        that window was previously never re-checked, so an already-approved
+        order would place anyway. Returns None if approved or if no
+        risk_engine is wired (tests / propose_only setups).
+        """
+        if self._risk_engine is None:
+            return None
+        verdict = self._risk_engine.check(candidate)
+        return None if verdict.approved else "; ".join(verdict.reasons)
+
     async def _rh_approval(
         self, request: OrderRequest, option_id: str, min_ticks: dict | None = None
     ) -> OrderResult:
@@ -300,6 +323,18 @@ class Executor:
                 request=request,
                 placed=False,
                 rejection_reason=f"user_rejected: {decision}",
+                review_summary=review_summary,
+                timestamp=datetime.now(timezone.utc),
+            )
+
+        risk_rejection = self._check_risk(request.candidate)
+        if risk_rejection is not None:
+            logger.warning("%s blocked by risk re-check after approval: %s",
+                            request.candidate.ticker, risk_rejection)
+            return OrderResult(
+                request=request,
+                placed=False,
+                rejection_reason=f"risk_gate_failed: {risk_rejection}",
                 review_summary=review_summary,
                 timestamp=datetime.now(timezone.utc),
             )
@@ -358,6 +393,18 @@ class Executor:
                 request=request,
                 placed=False,
                 rejection_reason=f"blocked_by_alerts: {'; '.join(blocking)}",
+                review_summary=review_summary,
+                timestamp=datetime.now(timezone.utc),
+            )
+
+        risk_rejection = self._check_risk(request.candidate)
+        if risk_rejection is not None:
+            logger.warning("%s blocked by risk re-check: %s",
+                            request.candidate.ticker, risk_rejection)
+            return OrderResult(
+                request=request,
+                placed=False,
+                rejection_reason=f"risk_gate_failed: {risk_rejection}",
                 review_summary=review_summary,
                 timestamp=datetime.now(timezone.utc),
             )

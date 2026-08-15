@@ -27,16 +27,24 @@ class RiskEngine:
       3. Premium cap  — contract cost (mid × 100) ≤ max_premium_per_trade
       4. Sector conc  — open trades in same GICS sector < max_sector_concentration
 
-    Kill-switch is permanent within a session: once tripped it cannot be reset
-    regardless of subsequent record_pnl calls.
+    Kill-switch is permanent for the current trading day: once tripped it
+    cannot be reset by subsequent record_pnl calls, only by the UTC day
+    rolling over (see _maybe_roll_day).
 
     sector_map: optional dict mapping ticker → GICS sector string.
     Tickers absent from the map skip the sector gate.
 
     state_file: path to a JSON file used to persist kill-switch and daily P&L
     across container restarts. Defaults to the RISK_STATE_FILE env var or
-    logs/risk_state.json. The file is reset to a clean slate at midnight UTC
-    (new trading day) so the kill-switch does not carry over between sessions.
+    logs/risk_state.json.
+
+    Daily P&L and the kill-switch are scoped to the calendar day (UTC) and
+    reset once it rolls over — checked live on every check()/record_pnl()
+    call via _maybe_roll_day(), not only at startup. A restart-only reset
+    left a real kill-switch trip active for two weeks straight in
+    production: nothing restarted the container between the trip and the
+    next several trading days, so the documented "resets at midnight"
+    behavior never actually ran.
     """
 
     def __init__(
@@ -64,6 +72,9 @@ class RiskEngine:
         raw_path = state_file or os.environ.get("RISK_STATE_FILE", _DEFAULT_STATE_FILE)
         self._state_file: Path = Path(raw_path)
         self._load_state()
+        # _load_state() discards anything not from today, so whatever's live
+        # in memory now (loaded or default) is already correctly scoped to today.
+        self._state_date: str = self._today_utc()
 
         # Pre-trip if injected portfolio already exceeds threshold
         self._evaluate_kill_threshold()
@@ -73,6 +84,7 @@ class RiskEngine:
     # ------------------------------------------------------------------
 
     def check(self, candidate: CandidateSignal) -> RiskVerdict:
+        self._maybe_roll_day()
         if self._kill_switch_active:
             return RiskVerdict(
                 approved=False,
@@ -118,6 +130,7 @@ class RiskEngine:
 
     def record_pnl(self, pnl: Decimal) -> None:
         """Accumulate realized P&L; may trip the kill-switch."""
+        self._maybe_roll_day()
         self._daily_pnl += pnl
         self._evaluate_kill_threshold()
         self._persist_state()
@@ -132,13 +145,36 @@ class RiskEngine:
 
     def _evaluate_kill_threshold(self) -> None:
         if self._kill_switch_active:
-            return  # can never be un-tripped
+            return  # can never be un-tripped — until _maybe_roll_day() rolls the day
         if self._account_nav <= 0:
             return
         threshold = -(self._account_nav * Decimal(str(self.params.daily_loss_kill_pct)))
         if self._daily_pnl <= threshold:
             self._kill_switch_active = True
             self._persist_state()
+
+    def _maybe_roll_day(self) -> None:
+        """Reset daily P&L and the kill-switch once the UTC day rolls over.
+
+        _load_state() only ran at __init__, so a long-running process that
+        never restarts kept a kill-switch trip active indefinitely past the
+        one day it was meant to protect — this happened live: a trip from a
+        bad day stayed active for two weeks because nothing restarted the
+        container in between. Called at the top of every check()/
+        record_pnl(), so a live process self-heals within one call of
+        midnight UTC without needing a restart or a separate timer.
+        """
+        today = self._today_utc()
+        if today == self._state_date:
+            return
+        logger.warning(
+            "RiskEngine: new trading day (%s -> %s) — resetting daily P&L and kill-switch",
+            self._state_date, today,
+        )
+        self._state_date = today
+        self._daily_pnl = Decimal("0")
+        self._kill_switch_active = False
+        self._persist_state()
 
     # ------------------------------------------------------------------
     # State persistence

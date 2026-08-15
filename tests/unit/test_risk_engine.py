@@ -5,11 +5,32 @@ from datetime import datetime, timezone, date
 
 import pytest
 
+import trader.risk.engine as risk_engine_module
 from trader.risk.engine import RiskEngine
 from trader.risk.schemas import PortfolioState, RiskParams, RiskVerdict
 from trader.scoring.schemas import CandidateSignal, BlendScores
 from trader.gex.schemas import GEXSetup, GEXRegime
 from trader.uw.schemas import OptionContract
+
+
+# ---------------------------------------------------------------------------
+# Isolation
+# ---------------------------------------------------------------------------
+#
+# RiskEngine persists to logs/risk_state.json by default. Every test in this
+# file constructs a bare RiskEngine() with no explicit state_file, so without
+# this fixture they read/write the REAL production file — flaky in a
+# calendar-dependent way (silently loads a real kill-switch trip into what a
+# test expects to be a clean engine whenever the persisted date happens to
+# match "today", exactly what happened running this suite in production).
+# Autouse + monkeypatching the module-level default means every existing
+# call site is isolated with zero changes to the test bodies below.
+
+
+@pytest.fixture(autouse=True)
+def isolated_risk_state(tmp_path, monkeypatch):
+    monkeypatch.setattr(risk_engine_module, "_DEFAULT_STATE_FILE", str(tmp_path / "risk_state.json"))
+    monkeypatch.delenv("RISK_STATE_FILE", raising=False)
 
 
 # ---------------------------------------------------------------------------
@@ -204,6 +225,86 @@ class TestKillSwitch:
         )
         engine = RiskEngine(portfolio=portfolio)
         assert engine.kill_switch_active is True
+
+
+# ---------------------------------------------------------------------------
+# Kill-switch day rollover — regression coverage for a live incident: a trip
+# from one bad day stayed active for two weeks because the reset only ran
+# at __init__, and nothing restarted the container in between.
+# ---------------------------------------------------------------------------
+
+
+class TestKillSwitchDayRollover:
+    def test_check_clears_switch_once_day_rolls_over(self, monkeypatch):
+        engine = RiskEngine(portfolio=PortfolioState(account_nav=Decimal("10000")))
+        engine.record_pnl(Decimal("-600"))
+        assert engine.kill_switch_active is True
+
+        monkeypatch.setattr(engine, "_today_utc", lambda: "2099-01-01")
+        engine.check(_make_candidate())
+        assert engine.kill_switch_active is False
+
+    def test_record_pnl_also_triggers_rollover(self, monkeypatch):
+        engine = RiskEngine(portfolio=PortfolioState(account_nav=Decimal("10000")))
+        engine.record_pnl(Decimal("-600"))
+        assert engine.kill_switch_active is True
+
+        monkeypatch.setattr(engine, "_today_utc", lambda: "2099-01-01")
+        engine.record_pnl(Decimal("0"))
+        assert engine.kill_switch_active is False
+
+    def test_daily_pnl_resets_to_zero_on_rollover(self, monkeypatch):
+        engine = RiskEngine(portfolio=PortfolioState(account_nav=Decimal("10000")))
+        engine.record_pnl(Decimal("-300"))
+        assert engine._daily_pnl == Decimal("-300")
+
+        monkeypatch.setattr(engine, "_today_utc", lambda: "2099-01-01")
+        engine.check(_make_candidate())
+        assert engine._daily_pnl == Decimal("0")
+
+    def test_new_losses_can_retrip_after_rollover(self, monkeypatch):
+        engine = RiskEngine(portfolio=PortfolioState(account_nav=Decimal("10000")))
+        engine.record_pnl(Decimal("-600"))
+        assert engine.kill_switch_active is True
+
+        monkeypatch.setattr(engine, "_today_utc", lambda: "2099-01-01")
+        engine.check(_make_candidate())  # rolls over, clears
+        assert engine.kill_switch_active is False
+
+        engine.record_pnl(Decimal("-600"))  # a fresh bad day
+        assert engine.kill_switch_active is True
+
+    def test_open_positions_survive_a_rollover(self, monkeypatch):
+        # Open positions and sector counts are not daily-scoped — a rollover
+        # must not forget positions that are still genuinely open.
+        engine = RiskEngine(
+            portfolio=PortfolioState(account_nav=Decimal("10000"), open_positions=2,
+                                     sector_counts={"tech": 1}),
+        )
+        monkeypatch.setattr(engine, "_today_utc", lambda: "2099-01-01")
+        engine.check(_make_candidate())
+        assert engine._open_positions == 2
+        assert engine._sector_counts == {"tech": 1}
+
+    def test_same_day_does_not_roll_over(self, monkeypatch):
+        engine = RiskEngine(portfolio=PortfolioState(account_nav=Decimal("10000")))
+        engine.record_pnl(Decimal("-600"))
+        assert engine.kill_switch_active is True
+        engine.check(_make_candidate())  # same day — must stay tripped
+        assert engine.kill_switch_active is True
+
+    def test_rollover_persists_reset_state_to_disk(self, monkeypatch, tmp_path):
+        state_file = tmp_path / "risk_state.json"
+        engine = RiskEngine(portfolio=PortfolioState(account_nav=Decimal("10000")),
+                            state_file=state_file)
+        engine.record_pnl(Decimal("-600"))
+        assert "true" in state_file.read_text().lower()
+
+        monkeypatch.setattr(engine, "_today_utc", lambda: "2099-01-01")
+        engine.check(_make_candidate())
+        contents = state_file.read_text()
+        assert "2099-01-01" in contents
+        assert '"kill_switch_active": false' in contents
 
 
 # ---------------------------------------------------------------------------

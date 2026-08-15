@@ -6,7 +6,7 @@ covers the plumbing that makes the live GEX setup reach the monitor.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 
@@ -23,10 +23,15 @@ from trader.uw.schemas import OptionContract
 
 ACCOUNT = "869536151"
 
+# Always well beyond dte_floor (default 7) relative to whenever tests run —
+# a fixed calendar date here previously went stale and started spuriously
+# firing dte_stop once "today" caught up to it.
+_FAR_EXPIRY = date.today() + timedelta(days=45)
+
 
 def _contract() -> OptionContract:
     return OptionContract(
-        ticker="AAPL", expiry=date(2026, 8, 14), strike=Decimal("200"),
+        ticker="AAPL", expiry=_FAR_EXPIRY, strike=Decimal("200"),
         type="call", bid=Decimal("2.90"), ask=Decimal("3.10"),
         open_interest=9000, volume=4500,
     )

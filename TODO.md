@@ -82,3 +82,13 @@ avg P&L, and drawdown per regime/setup type. The harness works
       it reads `strike_price`/`option_type` directly from order leg data
       (`get_option_orders`), which genuinely includes both fields natively
       (unlike `get_option_positions`). Not affected.
+- [x] Full audit for the same three bug classes (startup-only state, API
+      field misassumptions, silent-empty results) plus a fourth (guards not
+      applied uniformly across execution modes). Two real bugs found and
+      fixed — see CHANGELOG 2026-08-15:
+      `OrderLifecycleManager.adopt_working_orders()` had the reconciler's
+      exact silent-zero gap (now retries once + logs raw responses), and
+      `Executor` never re-checked `risk_engine.check()` immediately before
+      placing an `rh_approval`-mode order approved via Telegram/dashboard
+      (now re-verified in `_autonomous()`/`_rh_approval()` right before
+      `place_option_order`).

@@ -88,6 +88,26 @@ def _tool_by_state(orders_by_state: dict) -> MagicMock:
     return t
 
 
+def _tool_by_state_sequence(sequences_by_state: dict) -> MagicMock:
+    """get_option_orders mock where each state= yields the next response from
+    its own list on successive calls (repeating the last once exhausted) —
+    used to simulate a sweep that comes back empty once, then finds orders."""
+    calls: dict[str, int] = {}
+
+    async def _invoke(kwargs):
+        state = kwargs.get("state")
+        seq = sequences_by_state.get(state)
+        if not seq:
+            return {"data": {"orders": []}}
+        idx = calls.get(state, 0)
+        calls[state] = idx + 1
+        return seq[min(idx, len(seq) - 1)]
+
+    t = MagicMock()
+    t.ainvoke = AsyncMock(side_effect=_invoke)
+    return t
+
+
 def _manager(rh: dict, store: PositionStore | None = None) -> OrderLifecycleManager:
     return OrderLifecycleManager(
         rh_tools=rh,
@@ -248,6 +268,13 @@ class TestGiveUp:
 
 
 class TestAdoption:
+    @pytest.fixture(autouse=True)
+    def _no_real_sleep(self, monkeypatch):
+        # A zero-adoption sweep now retries once after asyncio.sleep(3) —
+        # patch it out so tests asserting adopted == 0 don't actually wait.
+        from trader.live import order_manager
+        monkeypatch.setattr(order_manager.asyncio, "sleep", AsyncMock())
+
     async def test_adopts_working_buy_order_from_live_shape(self):
         rh = {"get_option_orders": _tool(_order("confirmed"))}
         mgr = _manager(rh)
@@ -340,3 +367,48 @@ class TestAdoption:
         adopted = await mgr.adopt_working_orders()
         assert adopted == 1
         assert mgr.working_count == 1
+
+
+class TestAdoptionRetryOnEmpty:
+    """Same silent-empty-result class as the pre-fix reconciler bug: a false
+    "0 adopted" from a parse miss must not look identical to genuinely
+    having nothing to adopt — see order_manager.py's adopt_working_orders."""
+
+    @pytest.fixture(autouse=True)
+    def _no_real_sleep(self, monkeypatch):
+        from trader.live import order_manager
+        monkeypatch.setattr(order_manager.asyncio, "sleep", AsyncMock())
+
+    async def test_retries_once_when_first_sweep_adopts_nothing(self):
+        rh = {"get_option_orders": _tool_by_state_sequence({
+            "confirmed": [{"data": {"orders": []}}, _order("confirmed")],
+        })}
+        mgr = _manager(rh)
+        adopted = await mgr.adopt_working_orders()
+
+        assert adopted == 1
+        # 4 states x 2 full sweeps (empty first, real second)
+        assert rh["get_option_orders"].ainvoke.await_count == 8
+
+    async def test_does_not_retry_when_first_sweep_already_adopts(self):
+        rh = {"get_option_orders": _tool_by_state({"confirmed": _order("confirmed")})}
+        mgr = _manager(rh)
+        adopted = await mgr.adopt_working_orders()
+
+        assert adopted == 1
+        assert rh["get_option_orders"].ainvoke.await_count == 4  # one sweep, no retry
+
+    async def test_logs_raw_response_when_still_empty_after_retry(self, caplog):
+        rh = {"get_option_orders": _tool(_order("confirmed", processed="0"))}
+        # sell orders are never adopted — genuinely empty every time
+        order = _order("confirmed")
+        order["data"]["orders"][0]["legs"][0]["side"] = "sell"
+        rh = {"get_option_orders": _tool(order)}
+        mgr = _manager(rh)
+
+        with caplog.at_level("INFO", logger="trader.live.order_manager"):
+            adopted = await mgr.adopt_working_orders()
+
+        assert adopted == 0
+        assert rh["get_option_orders"].ainvoke.await_count == 8  # retried once, then stopped
+        assert any("raw responses" in r.message for r in caplog.records)

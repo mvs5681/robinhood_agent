@@ -9,6 +9,7 @@ import pytest
 from trader.executor.executor import Executor, _extract_order_id, _get_blocking_alerts, _summarize_review
 from trader.executor.schemas import ExecutionMode, OrderRequest, OrderResult
 from trader.gex.schemas import GEXRegime, GEXSetup
+from trader.risk.schemas import RiskVerdict
 from trader.scoring.schemas import BlendScores, CandidateSignal
 from trader.uw.schemas import OptionContract
 
@@ -632,6 +633,115 @@ class TestRhApproval:
             with patch("trader.executor.executor.interrupt", return_value=decision):
                 result = await executor.execute(_make_candidate())
             assert result.review_summary is not None
+
+
+# ---------------------------------------------------------------------------
+# Risk re-check immediately before placement
+# ---------------------------------------------------------------------------
+#
+# risk_gate() in the graph pipeline only runs once, at proposal creation.
+# For autonomous mode that's effectively atomic with placement, but
+# rh_approval placement (both the interrupt-resume path in _rh_approval and
+# the Telegram/dashboard execute_approved() -> _autonomous() path) can be
+# arbitrarily delayed behind a human tapping Approve. These tests cover the
+# fix: risk_engine.check() is re-verified immediately before place_option_order.
+
+
+def _risk_engine(approved: bool, reasons: list[str] | None = None) -> MagicMock:
+    engine = MagicMock()
+    engine.check = MagicMock(return_value=RiskVerdict(approved=approved, reasons=reasons or []))
+    return engine
+
+
+class TestRiskReCheckBeforePlacement:
+    async def test_autonomous_blocked_when_risk_check_fails(self):
+        rh = _rh_tools()
+        risk_engine = _risk_engine(approved=False, reasons=["kill_switch_active: daily loss limit reached"])
+        executor = Executor(
+            mode=ExecutionMode.AUTONOMOUS,
+            account_number=ACCOUNT,
+            rh_tools=rh,
+            risk_engine=risk_engine,
+        )
+        result = await executor.execute(_make_candidate())
+
+        assert result.placed is False
+        assert "risk_gate_failed" in result.rejection_reason
+        assert "kill_switch_active" in result.rejection_reason
+        rh["place_option_order"].ainvoke.assert_not_called()
+        risk_engine.check.assert_called_once()
+
+    async def test_autonomous_places_when_risk_check_passes(self):
+        rh = _rh_tools()
+        risk_engine = _risk_engine(approved=True)
+        executor = Executor(
+            mode=ExecutionMode.AUTONOMOUS,
+            account_number=ACCOUNT,
+            rh_tools=rh,
+            risk_engine=risk_engine,
+        )
+        result = await executor.execute(_make_candidate())
+
+        assert result.placed is True
+        risk_engine.check.assert_called_once()
+
+    async def test_autonomous_places_when_no_risk_engine_wired(self):
+        # Backwards compatible default — tests / propose_only setups that
+        # never pass risk_engine must keep working exactly as before.
+        rh = _rh_tools()
+        executor = Executor(mode=ExecutionMode.AUTONOMOUS, account_number=ACCOUNT, rh_tools=rh)
+        result = await executor.execute(_make_candidate())
+        assert result.placed is True
+
+    async def test_rh_approval_blocked_after_human_approves_if_risk_trips(self):
+        # The exact gap this fixes: kill-switch trips between proposal
+        # creation and the human tapping Approve.
+        rh = _rh_tools()
+        risk_engine = _risk_engine(approved=False, reasons=["kill_switch_active: daily loss limit reached"])
+        executor = Executor(
+            mode=ExecutionMode.RH_APPROVAL,
+            account_number=ACCOUNT,
+            rh_tools=rh,
+            risk_engine=risk_engine,
+        )
+        with patch("trader.executor.executor.interrupt", return_value="approve"):
+            result = await executor.execute(_make_candidate())
+
+        assert result.placed is False
+        assert "risk_gate_failed" in result.rejection_reason
+        rh["place_option_order"].ainvoke.assert_not_called()
+
+    async def test_rh_approval_places_when_risk_check_still_passes(self):
+        rh = _rh_tools()
+        risk_engine = _risk_engine(approved=True)
+        executor = Executor(
+            mode=ExecutionMode.RH_APPROVAL,
+            account_number=ACCOUNT,
+            rh_tools=rh,
+            risk_engine=risk_engine,
+        )
+        with patch("trader.executor.executor.interrupt", return_value="approve"):
+            result = await executor.execute(_make_candidate())
+
+        assert result.placed is True
+        rh["place_option_order"].ainvoke.assert_called_once()
+
+    async def test_execute_approved_blocked_when_risk_check_fails(self):
+        # The other real production path: Telegram/dashboard approval calls
+        # execute_approved() directly, which routes through _autonomous().
+        rh = _rh_tools()
+        risk_engine = _risk_engine(approved=False, reasons=["max_concurrent_positions (5) reached"])
+        executor = Executor(
+            mode=ExecutionMode.RH_APPROVAL,
+            account_number=ACCOUNT,
+            rh_tools=rh,
+            risk_engine=risk_engine,
+        )
+        result = await executor.execute_approved(_make_candidate())
+
+        assert result.placed is False
+        assert "risk_gate_failed" in result.rejection_reason
+        rh["place_option_order"].ainvoke.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

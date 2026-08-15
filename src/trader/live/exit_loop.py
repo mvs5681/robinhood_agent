@@ -246,6 +246,9 @@ class ExitLoop:
                 entry_premium=float(pos.entry_premium),
                 current_premium=float(signal.current_premium),
                 duration_ms=ms,
+                quantity=pos.quantity,
+                entry_regime=pos.entry_regime,
+                entry_setup_type=pos.entry_setup_type,
             )
 
         if self._notifier:

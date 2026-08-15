@@ -441,6 +441,9 @@ class TelemetryLogger:
         entry_premium: float,
         current_premium: float,
         duration_ms: float,
+        quantity: int = 1,
+        entry_regime: str | None = None,
+        entry_setup_type: str | None = None,
     ) -> None:
         self.emit(
             "exit_signal",
@@ -453,4 +456,7 @@ class TelemetryLogger:
             dte_remaining=dte_remaining,
             entry_premium=entry_premium,
             current_premium=current_premium,
+            quantity=quantity,
+            entry_regime=entry_regime,
+            entry_setup_type=entry_setup_type,
         )

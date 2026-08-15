@@ -17,6 +17,7 @@ Dashboard (served at /):
     GET  /api/telemetry/recent     — last 50 telemetry events
     GET  /api/telemetry/pnl        — exit_signal pnl_pct time series
     GET  /api/positions            — open positions from PositionStore
+    GET  /api/backtest              — nightly cumulative backtest replay result
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ from __future__ import annotations
 import json
 import logging
 import time as _time
+from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
 from aiohttp import web
@@ -289,6 +291,7 @@ tr:last-child td { border-bottom:none; }
   .pnl-stats-row { gap:8px; }
   .stat-card { min-width:auto; flex:1 1 calc(50% - 4px); }
   .pnl-chart-outer { padding:12px 8px; }
+  .backtest-compare-col { flex-basis:100%; min-width:0; }
   #glossary-btn { right:auto; left:20px; }
   #glossary-panel { right:auto; left:20px; width:calc(100vw - 40px); max-width:none; }
   /* Drawer becomes a bottom sheet on mobile */
@@ -317,6 +320,20 @@ tr:last-child td { border-bottom:none; }
                    border-radius:var(--radius); padding:16px; overflow-x:auto; }
 .pnl-chart-title { font-size:12px; color:var(--muted); margin-bottom:12px; }
 .pnl-table-wrap { max-height:360px; overflow-y:auto; margin-top:20px; }
+
+/* ── Backtest tab ── */
+.backtest-meta { font-size:11px; color:var(--muted); margin-bottom:14px; }
+.backtest-delta-callout { background:var(--surface); border:1px solid var(--border);
+             border-left:3px solid var(--blue); border-radius:var(--radius);
+             padding:12px 16px; margin-bottom:20px; font-size:13px; }
+.backtest-delta-callout b { font-size:16px; }
+.backtest-compare-grid { display:flex; gap:16px; flex-wrap:wrap; margin-bottom:20px; }
+.backtest-compare-col { flex:1 1 320px; min-width:280px; }
+.backtest-compare-title { font-size:12px; font-weight:700; text-transform:uppercase;
+             letter-spacing:.06em; color:var(--muted); margin-bottom:8px; }
+.sim-badge { display:inline-block; font-size:10px; font-weight:700; text-transform:uppercase;
+             letter-spacing:.04em; color:var(--muted); border:1px solid var(--border);
+             border-radius:4px; padding:1px 6px; margin-left:6px; vertical-align:middle; }
 """
 
 # ---------------------------------------------------------------------------
@@ -1045,6 +1062,200 @@ function renderPnlTable(data) {
     </tbody></table>`;
 }
 
+// ── Backtest tab ──────────────────────────────────────────────────────
+// Simulated (BacktestLoop's nightly replay against data/history/) vs
+// actual (live telemetry) side by side, over the same accumulated window.
+// Goal: surface gaps between backtested and real strategy behavior — the
+// trade-count delta alone (e.g. "47 simulated vs 3 real") is often the
+// sharpest signal, since it needs no fuzzy per-trade matching to be useful.
+async function loadBacktest() {
+  const wrap = document.getElementById('backtest-wrap');
+  let bt, real;
+  try {
+    [bt, real] = await Promise.all([
+      fetch('/api/backtest').then(r => r.json()),
+      fetch('/api/telemetry/pnl').then(r => r.json()),
+    ]);
+  } catch (e) {
+    wrap.innerHTML = '<div class="empty-msg">Failed to load backtest data.</div>';
+    return;
+  }
+  if (bt.status === 'not_yet_run') {
+    wrap.innerHTML = '<div class="empty-msg">No backtest run yet — the first result appears after tonight\'s replay (runs ~5pm ET, once enough tickers have a few days of captured history).</div>';
+    return;
+  }
+
+  const btAll = bt.all_time.overall;
+  const realClosed = real.filter(d => d.pnl_pct !== null && d.pnl_pct !== undefined);
+  const realWinRate = realClosed.length
+    ? realClosed.filter(d => d.pnl_pct > 0).length / realClosed.length : null;
+  const realAvg = realClosed.length
+    ? realClosed.reduce((a, d) => a + d.pnl_pct, 0) / realClosed.length : null;
+
+  const statCard = (label, value, cls) =>
+    `<div class="stat-card"><div class="stat-label">${label}</div><div class="stat-value ${cls}">${value}</div></div>`;
+  const pctStr = (v, digits) => (v === null || v === undefined) ? '—' : (v >= 0 ? '+' : '') + (v * 100).toFixed(digits) + '%';
+  const wrCls = wr => wr === null || wr === undefined ? 'neu' : (wr >= 0.5 ? 'pos' : 'neg');
+  const pnlCls = v => (v === null || v === undefined) ? 'neu' : (v >= 0 ? 'pos' : 'neg');
+
+  const deltaCount = btAll.trade_count - realClosed.length;
+  const deltaMsg = btAll.trade_count > 0
+    ? `<b>${btAll.trade_count}</b> simulated trade${btAll.trade_count === 1 ? '' : 's'} vs `
+      + `<b>${realClosed.length}</b> real trade${realClosed.length === 1 ? '' : 's'} over the same window`
+      + (deltaCount > 0 ? ` — <b>${deltaCount}</b> fewer executed live`
+         : deltaCount < 0 ? ` — <b>${-deltaCount}</b> more executed live than simulated` : ' — matched')
+    : 'No simulated trades yet in this window.';
+
+  wrap.innerHTML = `
+    <div class="backtest-meta">
+      As of ${new Date(bt.run_at).toLocaleString()} · ${bt.trading_days} trading day(s) captured
+      (${bt.start_date} → ${bt.end_date}) · ${bt.tickers.length} ticker(s) ·
+      $${bt.initial_capital.toLocaleString()} simulated capital
+      <span class="sim-badge">Simulated — not real trades</span>
+    </div>
+    <div class="backtest-delta-callout">${deltaMsg}</div>
+    <div class="backtest-compare-grid">
+      <div class="backtest-compare-col">
+        <div class="backtest-compare-title">Simulated (Backtest)</div>
+        <div class="pnl-stats-row">
+          ${statCard('Trades', btAll.trade_count, 'neu')}
+          ${statCard('Win Rate', btAll.closed_count ? (btAll.win_rate * 100).toFixed(0) + '%' : '—', wrCls(btAll.closed_count ? btAll.win_rate : null))}
+          ${statCard('Avg P&L', btAll.closed_count ? pctStr(btAll.avg_pnl_pct, 1) : '—', pnlCls(btAll.closed_count ? btAll.avg_pnl_pct : null))}
+        </div>
+      </div>
+      <div class="backtest-compare-col">
+        <div class="backtest-compare-title">Actual (Live Account)</div>
+        <div class="pnl-stats-row">
+          ${statCard('Trades', realClosed.length, 'neu')}
+          ${statCard('Win Rate', realWinRate !== null ? (realWinRate * 100).toFixed(0) + '%' : '—', wrCls(realWinRate))}
+          ${statCard('Avg P&L', pctStr(realAvg, 1), pnlCls(realAvg))}
+        </div>
+      </div>
+    </div>
+    <div id="backtest-chart-wrap" class="pnl-chart-outer" style="margin-top:4px"></div>
+    <div class="backtest-compare-title" style="margin-top:24px">By Regime / Setup (Backtest, All-Time)</div>
+    <div id="backtest-regime-wrap"></div>
+    <div class="backtest-compare-title" style="margin-top:24px">Simulated Trades</div>
+    <div id="backtest-trades-wrap" class="pnl-table-wrap"></div>
+    <div class="backtest-compare-title" style="margin-top:24px">Real Trades</div>
+    <div id="backtest-real-trades-wrap" class="pnl-table-wrap"></div>
+  `;
+
+  renderBacktestEquityCurve(bt.all_time.portfolio);
+  renderBacktestRegimeTable(bt.all_time.by_regime, bt.all_time.by_setup_type);
+  renderBacktestTradesTable(bt.trades);
+  renderBacktestRealTrades(real);
+}
+
+function renderBacktestEquityCurve(portfolio) {
+  const wrap = document.getElementById('backtest-chart-wrap');
+  if (!portfolio || !portfolio.equity_curve || !portfolio.equity_curve.length) {
+    wrap.innerHTML = '<div class="empty-msg" style="padding:0">No equity curve yet.</div>';
+    return;
+  }
+  const items = portfolio.equity_curve;
+  const values = items.map(d => d[1]);
+  const minV = Math.min(...values, portfolio.initial_capital);
+  const maxV = Math.max(...values, portfolio.initial_capital);
+  const pad = (maxV - minV) * 0.15 || maxV * 0.05 || 10;
+  const yMin = minV - pad, yMax = maxV + pad;
+
+  const lpad = 60, rpad = 16, tpad = 16, bpad = 8;
+  const W = Math.max(400, lpad + items.length * 6 + rpad);
+  const H = 200;
+  const chartH = H - tpad - bpad;
+
+  const scaleY = v => tpad + chartH * (yMax - v) / ((yMax - yMin) || 1);
+  const scaleX = i => lpad + (items.length <= 1 ? 0 : (W - lpad - rpad) * i / (items.length - 1));
+
+  let s = `<div class="pnl-chart-title">Simulated equity curve — starting $${portfolio.initial_capital.toLocaleString()}</div>`;
+  s += `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" style="display:block">`;
+
+  const steps = 4;
+  for (let i = 0; i <= steps; i++) {
+    const v = yMin + (yMax - yMin) * i / steps;
+    const y = scaleY(v);
+    s += `<line x1="${lpad}" y1="${y}" x2="${W - rpad}" y2="${y}" stroke="var(--border)" stroke-width="1" stroke-dasharray="3,4"/>`;
+    s += `<text x="${lpad - 6}" y="${y + 4}" text-anchor="end" font-size="9" fill="var(--muted)">$${Math.round(v).toLocaleString()}</text>`;
+  }
+  const baseY = scaleY(portfolio.initial_capital);
+  s += `<line x1="${lpad}" y1="${baseY}" x2="${W - rpad}" y2="${baseY}" stroke="var(--muted)" stroke-width="1"/>`;
+
+  const finalUp = items[items.length - 1][1] >= portfolio.initial_capital;
+  const color = finalUp ? 'var(--green)' : 'var(--red)';
+  const pathD = items.map((d, i) => `${i === 0 ? 'M' : 'L'} ${scaleX(i)} ${scaleY(d[1])}`).join(' ');
+  s += `<path d="${pathD}" fill="none" stroke="${color}" stroke-width="2"/>`;
+
+  const lastX = scaleX(items.length - 1), lastY = scaleY(items[items.length - 1][1]);
+  s += `<circle cx="${lastX}" cy="${lastY}" r="3" fill="${color}">
+          <title>${items[items.length - 1][0]} · $${items[items.length - 1][1].toLocaleString()}</title>
+        </circle>`;
+
+  s += `</svg>`;
+  wrap.innerHTML = s;
+}
+
+function renderBacktestRegimeTable(byRegime, bySetup) {
+  const wrap = document.getElementById('backtest-regime-wrap');
+  const row = (label, key, m) =>
+    `<tr><td style="color:var(--muted);font-size:11px">${label}</td><td><b>${key}</b></td>
+     <td>${m.trade_count}</td>
+     <td class="${m.closed_count ? (m.win_rate >= 0.5 ? 'result-ok' : 'result-err') : ''}">${m.closed_count ? (m.win_rate * 100).toFixed(0) + '%' : '—'}</td>
+     <td class="${m.closed_count ? (m.avg_pnl_pct >= 0 ? 'result-ok' : 'result-err') : ''}">${m.closed_count ? (m.avg_pnl_pct >= 0 ? '+' : '') + (m.avg_pnl_pct * 100).toFixed(1) + '%' : '—'}</td></tr>`;
+  const body = Object.entries(byRegime || {}).map(([k, m]) => row('Regime', k, m)).join('')
+    + Object.entries(bySetup || {}).map(([k, m]) => row('Setup', k, m)).join('');
+  if (!body) { wrap.innerHTML = '<div class="empty-msg" style="padding:0">No trades yet.</div>'; return; }
+  wrap.innerHTML = `<table>
+    <thead><tr><th></th><th>Value</th><th>Trades</th><th>Win Rate</th><th>Avg P&L</th></tr></thead>
+    <tbody>${body}</tbody></table>`;
+}
+
+function renderBacktestTradesTable(trades) {
+  const wrap = document.getElementById('backtest-trades-wrap');
+  if (!trades || !trades.length) { wrap.innerHTML = '<div class="empty-msg" style="padding:0">No simulated trades yet.</div>'; return; }
+  const reasonLabel = r => (r || '').replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+  wrap.innerHTML = `<table>
+    <thead><tr><th>Entry</th><th>Ticker</th><th>Type</th><th>P&L %</th><th>Status</th><th>Exit Reason</th></tr></thead>
+    <tbody>
+    ${trades.map(t => {
+      const hasPnl = t.pnl_pct !== null && t.pnl_pct !== undefined;
+      const pct = hasPnl ? t.pnl_pct * 100 : null;
+      const cls = hasPnl ? (pct >= 0 ? 'result-ok' : 'result-err') : '';
+      const sign = hasPnl && pct >= 0 ? '+' : '';
+      return `<tr>
+        <td style="color:var(--muted);font-size:11px">${t.entry_date}</td>
+        <td><b>${t.ticker}</b></td>
+        <td style="color:var(--muted);font-size:11px">${t.option_type}</td>
+        <td class="${cls}"><b>${hasPnl ? sign + pct.toFixed(1) + '%' : '—'}</b></td>
+        <td style="color:var(--muted);font-size:11px">${t.status}</td>
+        <td style="color:var(--muted);font-size:11px">${reasonLabel(t.exit_reason)}</td>
+      </tr>`;
+    }).join('')}
+    </tbody></table>`;
+}
+
+function renderBacktestRealTrades(real) {
+  const wrap = document.getElementById('backtest-real-trades-wrap');
+  if (!real || !real.length) { wrap.innerHTML = '<div class="empty-msg" style="padding:0">No real exits recorded yet.</div>'; return; }
+  const reasonLabel = r => (r || '').replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+  wrap.innerHTML = `<table>
+    <thead><tr><th>Time</th><th>Ticker</th><th>P&L %</th><th>Exit Reason</th></tr></thead>
+    <tbody>
+    ${[...real].reverse().map(d => {
+      const pct = d.pnl_pct * 100;
+      const cls = pct >= 0 ? 'result-ok' : 'result-err';
+      const sign = pct >= 0 ? '+' : '';
+      const ts = d.timestamp ? new Date(d.timestamp).toLocaleString() : '—';
+      return `<tr>
+        <td style="color:var(--muted);font-size:11px">${ts}</td>
+        <td><b>${d.ticker}</b></td>
+        <td class="${cls}"><b>${sign}${pct.toFixed(1)}%</b></td>
+        <td style="color:var(--muted);font-size:11px">${reasonLabel(d.reason)}</td>
+      </tr>`;
+    }).join('')}
+    </tbody></table>`;
+}
+
 // ── Glossary ──────────────────────────────────────────────────────────
 function initGlossary() {
   const btn   = document.getElementById('glossary-btn');
@@ -1075,6 +1286,7 @@ function refreshAll() {
   if (activeTab === 'log')        loadLog();
   if (activeTab === 'pnl')        loadPnl();
   if (activeTab === 'phases')     loadPhases();
+  if (activeTab === 'backtest')   loadBacktest();
 }
 
 // ── Settings tab ──────────────────────────────────────────────────────
@@ -1225,6 +1437,7 @@ _DASHBOARD_BODY = """
   <button data-tab="proposals">Proposals</button>
   <button data-tab="log">Log</button>
   <button data-tab="pnl">P&amp;L</button>
+  <button data-tab="backtest">Backtest</button>
   <button data-tab="settings">Settings</button>
 </nav>
 
@@ -1252,6 +1465,10 @@ _DASHBOARD_BODY = """
   <div id="pnl-stats" class="pnl-stats-row"><div class="empty-msg" style="padding:0">Loading…</div></div>
   <div id="pnl-chart-wrap" class="pnl-chart-outer" style="margin-top:4px"></div>
   <div id="pnl-table-wrap" class="pnl-table-wrap"></div>
+</div>
+
+<div id="tab-backtest" class="tab-pane">
+  <div id="backtest-wrap"><div class="empty-msg">Loading…</div></div>
 </div>
 
 <div id="tab-settings" class="tab-pane">
@@ -1314,8 +1531,10 @@ def create_app(
     position_store: PositionStore | None = None,
     config: LiveConfig | None = None,
     order_manager: OrderLifecycleManager | None = None,
+    backtest_results_file: str | Path = "data/backtest_results.json",
 ) -> web.Application:
     reader = telemetry_reader or TelemetryReader()
+    backtest_results_path = Path(backtest_results_file)
 
     middlewares: list[Callable] = []
     if dashboard_token:
@@ -1502,6 +1721,16 @@ def create_app(
     async def telemetry_pnl(req: web.Request) -> web.Response:
         return _json_response(reader.pnl_series())
 
+    async def get_backtest(req: web.Request) -> web.Response:
+        if not backtest_results_path.exists():
+            return _json_response({"status": "not_yet_run"})
+        try:
+            data = json.loads(backtest_results_path.read_text())
+        except Exception as exc:
+            logger.error("get_backtest: could not read %s: %s", backtest_results_path, exc)
+            return _json_response({"status": "not_yet_run"})
+        return _json_response(data)
+
     app.router.add_get("/health", health)
     app.router.add_get("/", dashboard)
     app.router.add_get("/proposals", list_proposals)
@@ -1519,5 +1748,6 @@ def create_app(
     app.router.add_get("/api/telemetry/funnel", telemetry_funnel)
     app.router.add_get("/api/telemetry/recent", telemetry_recent)
     app.router.add_get("/api/telemetry/pnl", telemetry_pnl)
+    app.router.add_get("/api/backtest", get_backtest)
 
     return app

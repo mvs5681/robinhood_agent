@@ -149,6 +149,10 @@ class TestFillPromotion:
         assert pos.quantity == 1
         assert pos.option_instrument_id == OPTION_ID
         assert pos.target_level == Decimal("140")
+        # Carried forward from the candidate's GEXSetup for backtest-vs-reality
+        # comparison — see _candidate()'s setup (regime=POSITIVE, setup_type="pin")
+        assert pos.entry_regime == "positive"
+        assert pos.entry_setup_type == "pin"
 
     async def test_partial_fill_then_cancel_promotes_partial(self):
         store = PositionStore()
@@ -327,6 +331,9 @@ class TestAdoption:
         assert len(positions) == 1
         assert positions[0].quantity == 1
         assert positions[0].entry_premium == Decimal("4.1500")
+        # No CandidateSignal for an adopted order — regime/setup_type unknown
+        assert positions[0].entry_regime is None
+        assert positions[0].entry_setup_type is None
 
         # remaining 2 contracts still being chased as a working order
         assert mgr.working_count == 1

@@ -1,5 +1,68 @@
 # Changelog
 
+## 2026-08-15 (backtest-vs-reality dashboard tab)
+
+Goal: a daily, cumulative simulated track record that can be compared
+against what the live account actually did over the same period, to
+surface gaps between backtested and real strategy behavior — not just "is
+the backtest profitable" in isolation.
+
+- **`BacktestHarness` gained a second, incremental replay mode.** The
+  existing `run()` (stateless, whole-window, used by `scripts/run_backtest.py`
+  for "what would the current strategy config have done historically")
+  is unchanged. New `step_forward(state)` advances a persisted `ReplayState`
+  (open positions, cash, full trade log, equity curve) through only the
+  dates not yet processed, so a nightly job can build up a cumulative track
+  record without re-walking the entire growing history from scratch each
+  time — each day's entries keep whatever config was live when they were
+  scored, instead of a retune silently reapplying across all of history.
+  `ReplayState.to_dict()`/`from_dict()` round-trip through JSON (Pydantic's
+  `model_dump(mode="json")` handles the nested `CandidateSignal`/
+  `ExitSignal`/`OptionContract` fields; `BacktestPosition`/
+  `BacktestTradeRecord` are serialized explicitly since they're plain
+  dataclasses).
+- **New `BacktestLoop`** (`src/trader/live/backtest_loop.py`), wired into
+  `run_live.py` alongside the other daily loops: runs once per trading day
+  at 5:00pm ET (30 min after `CaptureLoop`/`StateCaptureLoop` finish, so
+  that day's fixtures are guaranteed on disk), steps the replay forward
+  over `data/history/`, and persists `data/backtest_state.json` (full
+  resumable state) + `data/backtest_results.json` (display payload: overall
+  + by-regime/by-setup-type metrics both all-time and trailing-90-day, a
+  $2000-simulated equity curve, and a capped recent-trades list).
+  Runs via `asyncio.to_thread()` — the harness's async call chain does no
+  genuine I/O yielding against local JSON fixtures (it's "async" in
+  signature only), so calling it directly would block the same event loop
+  `FlowWatcher`'s 60s poll and `ExitLoop`'s 20s poll run on for the full
+  replay duration. Read-only against `data/history/`, fully isolated from
+  RiskEngine/PositionStore/Executor — a failure here can't touch live
+  trading.
+- **New "Backtest" dashboard tab** — side-by-side simulated-vs-actual stat
+  panels (win rate, avg P&L, trade count) over the same window, with the
+  trade-count delta called out prominently: this needs no per-trade
+  matching to be useful — "47 simulated trades vs 3 real trades" is
+  immediately legible as a strategy-vs-reality gap on its own (exactly what
+  the kill-switch/reconciliation/dedup bugs earlier this project would have
+  looked like from this view). New `GET /api/backtest` endpoint serves the
+  persisted results; the real side reuses the existing `/api/telemetry/pnl`
+  endpoint client-side rather than duplicating trade data server-side.
+  Clearly labeled "Simulated — not real trades" to avoid confusion with the
+  real P&L tab, which it deliberately mirrors in style.
+- **Telemetry: `exit_signal` events now carry `quantity`, `entry_regime`,
+  `entry_setup_type`.** Two gaps identified while designing the comparison:
+  real exits had no dollar-P&L basis (no quantity) and no regime/setup_type
+  slicing (unlike backtest trades, which always had `GEXSetup` context via
+  `CandidateSignal`) — meaning the comparison could only ever report blunt
+  aggregates, not *where* strategy and reality diverge. `Position` gained
+  `entry_regime`/`entry_setup_type` fields (populated from the entry-time
+  `CandidateSignal.gex_setup` in `order_manager.py::_promote()` and
+  `position_store.py::make_position()`; `None` for reconciled/adopted
+  positions where that context doesn't exist), threaded through to
+  `TelemetryLogger.exit_signal()` and surfaced in
+  `TelemetryReader.pnl_series()`. Entry-fill slippage (quoted vs. actual
+  fill price) remains uncaptured — deferred to the per-trade divergence
+  matching in TODO.md's v2 item, same bucket as explaining *why* trades
+  diverge rather than just *that* they do.
+
 ## 2026-08-15 (clean up orphaned MockUWTools mock module)
 
 - **Removed `src/trader/uw/mock_tools.py` and its dedicated test file** —

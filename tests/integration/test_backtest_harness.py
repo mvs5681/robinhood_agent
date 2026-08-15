@@ -268,6 +268,84 @@ class TestHarnessRun:
 
 
 # ---------------------------------------------------------------------------
+# Incremental replay — step_forward()
+# ---------------------------------------------------------------------------
+
+
+class TestStepForward:
+    """step_forward() must produce the same trade outcomes as run() when
+    covering the same window, whether called once or resumed across
+    multiple invocations with the state round-tripped through JSON in
+    between (exactly how BacktestLoop uses it night to night)."""
+
+    async def test_single_call_over_full_window_matches_run(
+        self, store: DataStore, policy: StandardPolicy, result: BacktestResult
+    ):
+        harness = BacktestHarness(policy, store, START, END, TICKERS)
+        state = await harness.step_forward()
+
+        assert len(state.records) == len(result.records)
+        closed = [r for r in state.records if r.status == "closed"]
+        assert any(r.exit_signal.reason == ExitReason.PROFIT_TARGET for r in closed)
+
+    async def test_resuming_across_two_calls_matches_single_call(
+        self, store: DataStore, policy: StandardPolicy
+    ):
+        from trader.backtest.state import ReplayState
+
+        # Night 1: only 2026-01-02 is "available" yet — simulate by using a
+        # harness whose end_date stops right there.
+        harness_day1 = BacktestHarness(policy, store, START, date(2026, 1, 2), TICKERS)
+        state = await harness_day1.step_forward()
+
+        assert state.processed_dates == [date(2026, 1, 2)]
+        assert len(state.open_positions) == 1  # entered, not yet exited
+
+        # Persist and reload exactly as BacktestLoop would between nights
+        state = ReplayState.from_dict(state.to_dict())
+
+        # Night 2: full window now available — step_forward must only
+        # process 2026-01-05 (already-processed 2026-01-02 is skipped)
+        harness_full = BacktestHarness(policy, store, START, END, TICKERS)
+        state = await harness_full.step_forward(state)
+
+        assert state.processed_dates == [date(2026, 1, 2), date(2026, 1, 5)]
+        # Day-2 fixture data also qualifies for a fresh entry right after the
+        # profit-target exit closes the day-1 position — matches what run()
+        # over the same full window produces (same trade, marked 'expired'
+        # there instead of 'open' since run() considers the window finished).
+        closed = [r for r in state.records if r.status == "closed"]
+        assert len(closed) == 1
+        assert closed[0].exit_signal.reason == ExitReason.PROFIT_TARGET
+        assert closed[0].pnl_pct > 0
+        assert len(state.open_positions) == 1
+        assert state.records[-1].status == "open"
+        assert state.records[-1].entry_date == date(2026, 1, 5)
+
+    async def test_resuming_does_not_reopen_or_duplicate_trades(
+        self, store: DataStore, policy: StandardPolicy
+    ):
+        harness = BacktestHarness(policy, store, START, END, TICKERS)
+        state = await harness.step_forward()
+        first_pass_count = len(state.records)
+
+        # Calling step_forward again with nothing new available must be a no-op
+        state = await harness.step_forward(state)
+        assert len(state.records) == first_pass_count
+
+    async def test_open_positions_not_marked_expired_unlike_run(
+        self, store: DataStore, policy: StandardPolicy
+    ):
+        # Stop the window right after entry, before the exit fires — run()
+        # would mark this 'expired'; step_forward() must leave it 'open'
+        # since the replay is only paused, not finished.
+        harness = BacktestHarness(policy, store, START, date(2026, 1, 2), TICKERS)
+        state = await harness.step_forward()
+        assert len(state.records) == 1
+        assert state.records[0].status == "open"
+
+
+# ---------------------------------------------------------------------------
 # Policy ABC
 # ---------------------------------------------------------------------------
 

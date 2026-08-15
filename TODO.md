@@ -3,11 +3,18 @@
 ## Backtesting against real history
 
 Goal: replace "is the strategy profitable?" guesswork with measured win rate,
-avg P&L, and drawdown per regime/setup type. The harness works
-(`python -m trader.backtest.cli`) but only has synthetic fixtures today.
+avg P&L, and drawdown per regime/setup type — and now also a direct
+comparison against what the live account actually did, to surface gaps
+between backtested and real strategy behavior. The manual CLI
+(`scripts/run_backtest.py`) evaluates "what would the current config have
+done over this window"; the dashboard's Backtest tab is a separate,
+cumulative "what has this strategy actually decided, day by day" track
+record (see CHANGELOG 2026-08-15).
 
-- [ ] Check what historical data the UW subscription exposes (flow alerts,
-      GEX by strike, darkpool, option chains — how far back, which endpoints)
+- [x] Check what historical data the UW subscription exposes — confirmed:
+      only `get_greek_exposure_by_strike`/`get_market_tide`/`get_flow_per_strike`
+      support historical `date=` filtering; flow alerts/darkpool/options
+      chain are current-data-only, hence the daily capture job below.
 - [x] Build a daily capture job that snapshots the live UW responses the
       pipeline consumes into `data/history/<date>/` — `CaptureLoop` +
       `StateCaptureLoop`, both wired into `run_live.py`, firing at 4:30pm ET.
@@ -17,13 +24,36 @@ avg P&L, and drawdown per regime/setup type. The harness works
       live scan and every captured fixture, permanently. See CHANGELOG
       2026-08-15. Captures from now on will have real IV data; the 18 days
       already on disk likely can't be backfilled (current-data-only endpoint).
-- [ ] Backfill as many past days as the API allows
-- [ ] Run the harness over the accumulated history; review metrics by regime
-      and setup type (`by_regime`, `by_setup_type` in `BacktestResult`)
+- [x] Run the harness over the accumulated history — `BacktestLoop` does
+      this nightly now, incrementally, feeding the dashboard's Backtest tab.
+      `scripts/run_backtest.py` remains available for one-off manual runs
+      with different params (metrics already sliced `by_regime`/
+      `by_setup_type` in `BacktestResult`).
+- [ ] Backfill as many past days as the API allows for the endpoints that
+      support it, to widen the regime coverage faster than daily capture
+      alone accumulates it.
 - [ ] Use results to tune the live dials: flow min premium, discovery premium,
-      selector DTE/delta window, stop-loss / DTE floor
+      selector DTE/delta window, stop-loss / DTE floor.
 - [ ] Re-run the backtest after each tuning change to confirm improvement
-      before applying it to the live config
+      before applying it to the live config.
+- [ ] **v2: per-trade divergence matching.** The current dashboard
+      comparison is aggregate-only (trade count, win rate, avg P&L side by
+      side) — deliberately deferred: matching a specific real trade to "the
+      backtest would have taken this same ticker around this date" to
+      explain *why* they diverge, not just *that* they do. Would need
+      fuzzy ticker/date matching (real trade timestamps are intraday;
+      backtest trades are date-granularity until the intraday capture
+      work below lands) and handling for trades one side took that the
+      other didn't at all. Also the natural home for entry-slippage
+      tracking (quoted mid-price at proposal time vs. actual average fill
+      premium) — currently uncaptured on the real side entirely.
+- [ ] Increase capture granularity beyond once-daily: hourly snapshots
+      (piggybacked on `GEXScanner`'s existing hourly refresh — zero extra
+      UW calls, just persisting more of what's already fetched) and an
+      append-only intraday flow-alert log (piggybacked on `FlowWatcher`'s
+      existing 60s poll) — flow alerts are current-data-only, so this is
+      the only way to ever recover real intraday flow timing for replay.
+      Would also raise the ceiling on how precise v2's matching above can be.
 
 ## Later / nice to have
 

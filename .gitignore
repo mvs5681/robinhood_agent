@@ -6,3 +6,7 @@ __pycache__/
 *.egg-info/
 dist/
 .env
+
+# Runtime state / captured data — not fixtures, those live under tests/fixtures/
+/data/
+/logs/

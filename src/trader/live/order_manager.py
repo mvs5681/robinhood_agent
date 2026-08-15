@@ -523,8 +523,12 @@ class OrderLifecycleManager:
         qty = int(self._dec(order.get("processed_quantity")) or Decimal(wo.quantity))
         entry = self._avg_fill_premium(order, qty) or wo.price
         target = None
+        regime = None
+        setup_type = None
         if wo.candidate is not None and wo.candidate.gex_setup is not None:
             target = wo.candidate.gex_setup.target_level
+            regime = wo.candidate.gex_setup.regime.value
+            setup_type = wo.candidate.gex_setup.setup_type
         pos = Position(
             position_id=wo.order_id,
             ticker=wo.ticker,
@@ -534,6 +538,8 @@ class OrderLifecycleManager:
             opened_at=datetime.now(timezone.utc),
             quantity=qty,
             option_instrument_id=wo.option_id,
+            entry_regime=regime,
+            entry_setup_type=setup_type,
         )
         await self._store.add(pos)
         logger.info("FILLED %s x%d @ %s — position tracked (%s)",

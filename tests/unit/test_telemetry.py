@@ -455,3 +455,23 @@ class TestStageHelpers:
         assert ev["pnl_pct"] == pytest.approx(0.583)
         assert ev["entry_premium"] == pytest.approx(3.0)
         assert ev["current_premium"] == pytest.approx(4.75)
+        # Defaults when the caller doesn't pass them (e.g. old call sites)
+        assert ev["quantity"] == 1
+        assert ev["entry_regime"] is None
+        assert ev["entry_setup_type"] is None
+
+    def test_exit_signal_carries_quantity_and_regime_context(self, caplog):
+        # Enables backtest-vs-reality comparison: dollar P&L needs quantity,
+        # regime/setup_type slicing needs the entry-time GEXSetup context.
+        with caplog.at_level(logging.INFO, logger="trader.telemetry"):
+            tel = TelemetryLogger()
+            tel.exit_signal(ticker="AAPL", position_id="pos-001",
+                            reason="stop_loss", pnl_pct=-0.35,
+                            dte_remaining=10, entry_premium=3.0,
+                            current_premium=1.95, duration_ms=0.5,
+                            quantity=3, entry_regime="negative",
+                            entry_setup_type="squeeze")
+        ev = _capture_events(tel, caplog)[0]
+        assert ev["quantity"] == 3
+        assert ev["entry_regime"] == "negative"
+        assert ev["entry_setup_type"] == "squeeze"

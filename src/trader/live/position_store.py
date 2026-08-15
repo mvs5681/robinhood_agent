@@ -36,6 +36,8 @@ def make_position(
         opened_at=datetime.now(timezone.utc),
         quantity=quantity,
         option_instrument_id=instrument_id,
+        entry_regime=gs.regime.value,
+        entry_setup_type=gs.setup_type,
     )
 
 

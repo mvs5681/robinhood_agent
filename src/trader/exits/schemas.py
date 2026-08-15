@@ -32,6 +32,12 @@ class Position(BaseModel):
     sector: str | None = None
     peak_premium: Decimal | None = None  # highest premium observed since entry — updated
                                          # by ExitLoop each tick, drives the trailing stop
+    # GEXSetup context at entry — None for reconciled/adopted positions where
+    # the originating CandidateSignal isn't available. Carried through to
+    # exit telemetry so live trades can be sliced by regime/setup_type the
+    # same way backtest trades already are, for backtest-vs-reality comparison.
+    entry_regime: str | None = None
+    entry_setup_type: str | None = None
 
 
 class ExitSignal(BaseModel):

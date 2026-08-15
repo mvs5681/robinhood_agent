@@ -39,6 +39,7 @@ from trader.executor.executor import Executor
 from trader.executor.schemas import ExecutionMode
 from trader.exits.monitor import ExitMonitor
 from trader.live.approval_server import create_app
+from trader.live.backtest_loop import BacktestLoop
 from trader.live.cache import GEXCache
 from trader.live.capture_loop import CaptureLoop
 from trader.live.config import LiveConfig
@@ -243,6 +244,14 @@ async def main() -> None:
         min_premium=int(os.environ.get("DISCOVERY_MIN_PREMIUM", "250000")),
         max_tickers=int(os.environ.get("MAX_DISCOVERED_TICKERS", "20")),
     )
+    backtest_results_file = os.environ.get("BACKTEST_RESULTS_FILE", "data/backtest_results.json")
+    backtest_loop = BacktestLoop(
+        history_dir=history_dir,
+        results_file=backtest_results_file,
+        initial_capital=float(os.environ.get("BACKTEST_CAPITAL", "2000")),
+        max_concurrent_positions=risk_engine.params.max_concurrent_positions,
+        bypass_flow_gate=os.environ.get("BACKTEST_BYPASS_FLOW_GATE", "true").lower() not in ("false", "0", "no"),
+    )
 
     watcher = FlowWatcher(
         uw_tools=uw_tools,
@@ -291,6 +300,7 @@ async def main() -> None:
         position_store=position_store,
         config=config,
         order_manager=order_manager,
+        backtest_results_file=backtest_results_file,
     )
     runner = web.AppRunner(app)
     await runner.setup()
@@ -315,7 +325,8 @@ async def main() -> None:
     if notifier:
         await notifier.send_startup_check()
 
-    coroutines = [scanner.run(), watcher.run(), exit_loop.run(), capture_loop.run(), state_capture_loop.run()]
+    coroutines = [scanner.run(), watcher.run(), exit_loop.run(), capture_loop.run(),
+                  state_capture_loop.run(), backtest_loop.run()]
     if order_manager is not None:
         coroutines.append(order_manager.run())
     if notifier:

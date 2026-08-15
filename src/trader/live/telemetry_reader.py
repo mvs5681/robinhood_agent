@@ -266,7 +266,11 @@ class TelemetryReader:
         """Return all exit_signal events as a pnl_pct time series.
 
         Returns:
-            [{"timestamp": str, "ticker": str, "pnl_pct": float, "reason": str}, ...]
+            [{"timestamp": str, "ticker": str, "pnl_pct": float, "reason": str,
+              "quantity": int, "entry_regime": str|None, "entry_setup_type": str|None,
+              "entry_premium": float|None, "current_premium": float|None}, ...]
+            quantity/entry_regime/entry_setup_type are None on events emitted before
+            this field existed — older log lines simply won't have them.
         """
         out = []
         with self._lock:
@@ -280,5 +284,10 @@ class TelemetryReader:
                     "ticker": ev.get("ticker", ""),
                     "pnl_pct": ev.get("pnl_pct"),
                     "reason": ev.get("reason", ""),
+                    "quantity": ev.get("quantity"),
+                    "entry_regime": ev.get("entry_regime"),
+                    "entry_setup_type": ev.get("entry_setup_type"),
+                    "entry_premium": ev.get("entry_premium"),
+                    "current_premium": ev.get("current_premium"),
                 })
         return out

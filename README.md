@@ -2,6 +2,10 @@
 
 An event-driven options trading agent that uses Gamma Exposure (GEX) structure and unusual options flow to identify and execute high-conviction trades on Robinhood.
 
+For the full picture — every gate, threshold, and data source, with
+diagrams — see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). This README
+stays intentionally brief.
+
 ---
 
 ## How it works
@@ -31,7 +35,7 @@ The agent runs two async loops in a single process:
 
 ## Ticker selection
 
-Each hour the scanner calls `get_flow_alerts` (Unusual Whales) to discover which tickers have significant options premium volume. Tickers above the `DISCOVERY_MIN_PREMIUM` threshold (default $500K) are ranked by total premium and scanned for GEX structure. No static watchlist is required.
+Each hour the scanner calls `get_flow_alerts` (Unusual Whales) to discover which tickers have significant options premium volume. Tickers above the `DISCOVERY_MIN_PREMIUM` threshold (default $250K) are ranked by total premium and scanned for GEX structure. No static watchlist is required.
 
 You can optionally set `TICKERS` as a seed list — those tickers are always scanned regardless of flow activity that hour.
 

@@ -75,12 +75,21 @@ class TestRunOnce:
         assert results["trades"][0]["ticker"] == "AAPL"
 
     async def test_all_time_includes_profit_target_trade(self, tmp_path):
-        loop = _loop(tmp_path)
+        # dynamic_exits_enabled=False: this test is about the JSON results
+        # shape (trade data flows through with a populated exit_reason), not
+        # about which exit mode is active — pin static explicitly so it
+        # doesn't depend on whether the fixture's live-advanced wall (see
+        # test_backtest_harness.py) happens to close within this 2-day window.
+        loop = _loop(tmp_path, dynamic_exits_enabled=False)
         await loop.run_once()
 
         results = json.loads((tmp_path / "backtest_results.json").read_text())
         reasons = {t["exit_reason"] for t in results["trades"] if t["exit_reason"]}
         assert "profit_target" in reasons
+
+    async def test_defaults_to_dynamic_exits_matching_live(self, tmp_path):
+        loop = _loop(tmp_path)
+        assert loop._dynamic_exits_enabled is True
 
     async def test_second_call_is_idempotent_no_new_dates(self, tmp_path):
         loop = _loop(tmp_path)

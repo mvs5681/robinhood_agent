@@ -213,21 +213,21 @@ class TestHarnessRun:
         entry_dates = {r.entry_date for r in result.records}
         assert date(2026, 1, 2) in entry_dates
 
-    async def test_profit_target_fires_on_day_two(self, result: BacktestResult):
-        # dynamic_exits_enabled defaults False (StandardPolicy()'s bare
-        # ExitMonitor()) — static behavior: gate 1 uses the entry-snapshotted
-        # target_level (200) unconditionally, and day 2's spot (201.50) has
-        # already crossed it.
-        closed = [r for r in result.records if r.status == "closed"]
-        assert len(closed) >= 1
-        profit_targets = [
-            r for r in closed if r.exit_signal.reason == ExitReason.PROFIT_TARGET
-        ]
-        assert len(profit_targets) >= 1
-
-    async def test_exit_date_is_day_two(self, result: BacktestResult):
-        closed = [r for r in result.records if r.status == "closed"]
-        assert any(r.exit_date == date(2026, 1, 5) for r in closed)
+    async def test_holds_past_entry_wall_when_live_wall_advances(
+        self, result: BacktestResult
+    ):
+        # dynamic_exits_enabled defaults True (StandardPolicy()'s bare
+        # ExitMonitor()) — gate 1 resolves the *live* wall each tick instead
+        # of the frozen entry snapshot. Day 2 spot (201.50) crosses the
+        # entry-snapshotted wall (200), but that day's live spot_gex shows a
+        # bigger wall at 210 (600M gamma vs 400M at 205) now that 200 has
+        # dropped below spot — the position holds for that wall instead of
+        # taking the small early profit at the stale entry snapshot, so the
+        # day-2 entry doesn't close within the fixture's 2-day window.
+        first = result.records[0]
+        assert first.entry_date == date(2026, 1, 2)
+        assert first.position.target_level == Decimal("200")  # entry snapshot, unchanged
+        assert first.status != "closed"
 
     async def test_profit_target_exit_is_positive_pnl(self, result: BacktestResult):
         closed = [r for r in result.records if r.status == "closed"]
@@ -272,29 +272,29 @@ class TestHarnessRun:
 
 
 # ---------------------------------------------------------------------------
-# Dynamic exits (dynamic_exits_enabled=True) — same fixture, different policy
+# Static exits (dynamic_exits_enabled=False) — same fixture, different policy
 # ---------------------------------------------------------------------------
 
 
-class TestHarnessRunWithDynamicExits:
-    async def test_holds_past_entry_wall_when_live_wall_advances(self, store: DataStore):
-        # With dynamic exits on, gate 1 resolves the *live* wall each tick
-        # instead of the frozen entry snapshot. Day 2 spot (201.50) crosses
-        # the entry-snapshotted wall (200), but that day's live spot_gex
-        # shows a bigger wall at 210 (600M gamma vs 400M at 205) now that 200
-        # has dropped below spot — the position holds for that wall instead
-        # of taking the small early profit at the stale entry snapshot, so
-        # the day-2 entry doesn't close within the fixture's 2-day window.
+class TestHarnessRunWithStaticExits:
+    async def test_profit_target_fires_on_day_two(self, store: DataStore):
+        # With dynamic exits off, gate 1 uses the entry-snapshotted
+        # target_level (200) unconditionally — day 2's spot (201.50) has
+        # already crossed it, so the position closes there instead of
+        # holding for the live-advanced wall at 210.
         from trader.exits.monitor import ExitMonitor
 
-        policy = StandardPolicy(exit_monitor=ExitMonitor(dynamic_exits_enabled=True))
+        policy = StandardPolicy(exit_monitor=ExitMonitor(dynamic_exits_enabled=False))
         harness = BacktestHarness(policy, DataStore(HISTORY_ROOT), START, END, TICKERS)
         result = await harness.run()
 
-        first = result.records[0]
-        assert first.entry_date == date(2026, 1, 2)
-        assert first.position.target_level == Decimal("200")  # entry snapshot, unchanged
-        assert first.status != "closed"
+        closed = [r for r in result.records if r.status == "closed"]
+        assert len(closed) >= 1
+        profit_targets = [
+            r for r in closed if r.exit_signal.reason == ExitReason.PROFIT_TARGET
+        ]
+        assert len(profit_targets) >= 1
+        assert any(r.exit_date == date(2026, 1, 5) for r in closed)
 
 
 # ---------------------------------------------------------------------------
@@ -308,20 +308,33 @@ class TestStepForward:
     multiple invocations with the state round-tripped through JSON in
     between (exactly how BacktestLoop uses it night to night)."""
 
-    async def test_single_call_over_full_window_matches_run(
-        self, store: DataStore, policy: StandardPolicy, result: BacktestResult
-    ):
+    @staticmethod
+    def _static_policy() -> StandardPolicy:
+        # These two tests' narrative depends on the specific
+        # profit-target-close-then-reenter trade sequence this fixture
+        # produces under the original static thresholds — orthogonal to what
+        # they're actually verifying (state persistence/resumption fidelity
+        # between step_forward() calls), so pin the exit mode explicitly
+        # rather than coupling it to whatever the shared `policy` fixture's
+        # default happens to be.
+        from trader.exits.monitor import ExitMonitor
+
+        return StandardPolicy(exit_monitor=ExitMonitor(dynamic_exits_enabled=False))
+
+    async def test_single_call_over_full_window_matches_run(self, store: DataStore):
+        policy = self._static_policy()
         harness = BacktestHarness(policy, store, START, END, TICKERS)
         state = await harness.step_forward()
+        result = await BacktestHarness(self._static_policy(), store, START, END, TICKERS).run()
 
         assert len(state.records) == len(result.records)
         closed = [r for r in state.records if r.status == "closed"]
         assert any(r.exit_signal.reason == ExitReason.PROFIT_TARGET for r in closed)
 
-    async def test_resuming_across_two_calls_matches_single_call(
-        self, store: DataStore, policy: StandardPolicy
-    ):
+    async def test_resuming_across_two_calls_matches_single_call(self, store: DataStore):
         from trader.backtest.state import ReplayState
+
+        policy = self._static_policy()
 
         # Night 1: only 2026-01-02 is "available" yet — simulate by using a
         # harness whose end_date stops right there.

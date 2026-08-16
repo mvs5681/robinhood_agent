@@ -18,14 +18,13 @@ class TestDefaults:
         assert cfg.discovery_min_premium == Decimal("250000")
         assert cfg.max_discovered_tickers == 20
         assert cfg.seed_tickers == []
-        # Master switch defaults OFF — shipping this code must not silently
-        # change live trading behavior.
-        assert cfg.dynamic_exits_enabled is False
+        # Master switch defaults ON — validated in backtest, approved for live.
+        assert cfg.dynamic_exits_enabled is True
 
     def test_dynamic_exits_enabled_from_env(self, monkeypatch):
-        monkeypatch.setenv("DYNAMIC_EXITS_ENABLED", "true")
+        monkeypatch.setenv("DYNAMIC_EXITS_ENABLED", "false")
         cfg = LiveConfig.from_env()
-        assert cfg.dynamic_exits_enabled is True
+        assert cfg.dynamic_exits_enabled is False
 
     def test_env_values_used(self, monkeypatch):
         monkeypatch.setenv("DISCOVERY_MIN_PREMIUM", "100000")
@@ -70,13 +69,13 @@ class TestUpdate:
 
     def test_dynamic_exits_enabled_toggle_via_update(self):
         cfg = LiveConfig()
-        assert cfg.dynamic_exits_enabled is False
-        errors = cfg.update({"dynamic_exits_enabled": "true"})
-        assert errors == []
         assert cfg.dynamic_exits_enabled is True
         errors = cfg.update({"dynamic_exits_enabled": "false"})
         assert errors == []
         assert cfg.dynamic_exits_enabled is False
+        errors = cfg.update({"dynamic_exits_enabled": "true"})
+        assert errors == []
+        assert cfg.dynamic_exits_enabled is True
 
     def test_bad_ticker_symbols_rejected(self):
         cfg = LiveConfig()

@@ -1300,7 +1300,7 @@ function refreshAll() {
 // ── Settings tab ──────────────────────────────────────────────────────
 const SETTINGS_FIELDS = [
   {key:'dynamic_exits_enabled', label:'Dynamic Exits Enabled', type:'checkbox',
-   hint:'Master switch for all dynamic exit adjustments below (IV scaling, momentum confirmation, gamma-wall structure, thesis-confidence decay, earnings/liquidity awareness). Off = original static thresholds only. Validate in backtest before enabling live.'},
+   hint:'Master switch for all dynamic exit adjustments below (IV scaling, momentum confirmation, gamma-wall structure, thesis-confidence decay, earnings/liquidity awareness). On by default. Turn off to fall back to the original static thresholds only.'},
   {key:'seed_tickers', label:'Seed Tickers', type:'text',
    hint:'Comma-separated; always scanned every cycle, exempt from the premium threshold (e.g. SPY,QQQ,SPX)'},
   {key:'discovery_min_premium', label:'Discovery Min Premium ($)', type:'number',

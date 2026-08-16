@@ -53,6 +53,7 @@ from trader.backtest.harness import BacktestHarness
 from trader.backtest.metrics import BacktestResult, PortfolioMetrics, TradeMetrics, compute_backtest_result
 from trader.backtest.policy import StandardPolicy
 from trader.backtest.state import ReplayState
+from trader.exits.monitor import ExitMonitor
 from trader.live.state_capture import StateCapture
 
 if TYPE_CHECKING:
@@ -195,6 +196,7 @@ class BacktestLoop:
         window_days: int = _WINDOW_DAYS,
         min_coverage_days: int = _MIN_COVERAGE_DAYS,
         bypass_flow_gate: bool = True,
+        dynamic_exits_enabled: bool = True,
     ) -> None:
         # Defaults to True: verified live that flow_alerts.json captures are
         # a single end-of-day snapshot of "whatever's currently in the UW
@@ -216,11 +218,18 @@ class BacktestLoop:
         self._window_days = window_days
         self._min_coverage_days = min_coverage_days
         self._bypass_flow_gate = bypass_flow_gate
+        # Defaults to True — matches ExitMonitor's own default (backtesting
+        # adopts the same dynamic exit rules live trading uses, so the
+        # dashboard's backtest-vs-reality comparison is apples-to-apples).
+        # Pass False to compare against the original static thresholds.
+        self._dynamic_exits_enabled = dynamic_exits_enabled
 
     async def run(self) -> None:
         logger.info(
-            "BacktestLoop started — capital=$%.0f window=%dd min_coverage=%dd bypass_flow_gate=%s",
-            self._initial_capital, self._window_days, self._min_coverage_days, self._bypass_flow_gate,
+            "BacktestLoop started — capital=$%.0f window=%dd min_coverage=%dd "
+            "bypass_flow_gate=%s dynamic_exits_enabled=%s",
+            self._initial_capital, self._window_days, self._min_coverage_days,
+            self._bypass_flow_gate, self._dynamic_exits_enabled,
         )
         while True:
             secs = _seconds_until_next_run()
@@ -258,7 +267,10 @@ class BacktestLoop:
         start_date = available[0]
         end_date = date.today()
         harness = BacktestHarness(
-            policy=StandardPolicy(bypass_flow_gate=self._bypass_flow_gate),
+            policy=StandardPolicy(
+                bypass_flow_gate=self._bypass_flow_gate,
+                exit_monitor=ExitMonitor(dynamic_exits_enabled=self._dynamic_exits_enabled),
+            ),
             data_store=store,
             start_date=start_date,
             end_date=end_date,

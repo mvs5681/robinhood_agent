@@ -98,11 +98,14 @@ class ExitMonitor:
     thesis-confidence decay, earnings gap, liquidity awareness). False
     reproduces the original static-threshold behavior exactly: entry-snapshotted
     target_level, binary thesis direction-flip only, no IV/momentum/earnings/
-    liquidity adjustments. Defaults to False here too — bare `ExitMonitor()`
-    construction (e.g. StandardPolicy's fallback, used by BacktestLoop's
-    nightly replay with no per-tick override the way ExitLoop has via
-    LiveConfig) must not silently opt into dynamic behavior either. Tests and
-    scripts/run_backtest.py's --dynamic-exits flag opt in explicitly.
+    liquidity adjustments. Defaults to True — validated in backtest and enabled
+    live (see LiveConfig.dynamic_exits_enabled). Bare `ExitMonitor()`
+    construction (StandardPolicy's fallback, used by BacktestLoop's nightly
+    replay with no per-tick override the way ExitLoop has via LiveConfig)
+    picks this up automatically, so backtesting reflects the same rules live
+    trading uses. Pass False explicitly (or scripts/run_backtest.py's
+    --static-exits flag) to reproduce the pre-dynamic-exits static baseline
+    for comparison.
     """
 
     def __init__(
@@ -121,7 +124,7 @@ class ExitMonitor:
         earnings_buffer_days: int = 2,
         liquidity_spread_widen_threshold_pct: float = 0.15,
         liquidity_wall_adjustment_pct: float = 0.50,
-        dynamic_exits_enabled: bool = False,
+        dynamic_exits_enabled: bool = True,
     ) -> None:
         self.dynamic_exits_enabled = dynamic_exits_enabled
         self.stop_loss_pct = stop_loss_pct

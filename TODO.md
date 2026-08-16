@@ -109,8 +109,9 @@ record (see CHANGELOG 2026-08-15).
       Done as part of the dynamic-exits work: `Position.entry_gex_setup` now
       holds the entry snapshot, and `ExitMonitor._thesis_confidence_decayed`
       exits on confidence-decay/wall-drift even without a full direction
-      flip. Gated behind `LiveConfig.dynamic_exits_enabled` (default False —
-      validate in backtest before flipping on live).
+      flip. Gated behind `LiveConfig.dynamic_exits_enabled` — validated in
+      backtest and enabled live (default True as of the enable-dynamic-exits
+      branch; `BacktestLoop`'s nightly replay uses the same setting).
 - [ ] Earnings-gap and liquidity-aware exits (new in the dynamic-exits work)
       are live-only: `days_to_earnings`/`spread_pct` come from RH
       `get_earnings_calendar`/`get_option_price_book`, neither threaded into

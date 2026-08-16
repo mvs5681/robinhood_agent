@@ -151,11 +151,11 @@ class LiveConfig:
     # Master switch for the dynamic exit adjustments (IV scaling, momentum
     # confirmation, gamma-wall structure, thesis-confidence decay, earnings/
     # liquidity awareness) added on top of the original static thresholds.
-    # Defaults OFF: shipping this code must not silently change live trading
-    # behavior — enable only after validating in backtest, matching the
-    # project's "never enable new automated behavior without explicit
-    # approval + passing backtest" rule.
-    dynamic_exits_enabled: bool = False
+    # Enabled — validated in backtest (scripts/run_backtest.py) and approved
+    # to run live. Set to False (env DYNAMIC_EXITS_ENABLED=false, or the
+    # dashboard Settings toggle) to fall back to the original static
+    # thresholds without a redeploy.
+    dynamic_exits_enabled: bool = True
     discovery_min_premium: Decimal = Decimal("250000")
     max_discovered_tickers: int = 20
     flow_min_premium: Decimal = Decimal("100000")
@@ -184,7 +184,7 @@ class LiveConfig:
     @classmethod
     def from_env(cls, path: Path | str | None = None) -> "LiveConfig":
         cfg = cls(
-            dynamic_exits_enabled=_parse_bool(os.environ.get("DYNAMIC_EXITS_ENABLED", "false")),
+            dynamic_exits_enabled=_parse_bool(os.environ.get("DYNAMIC_EXITS_ENABLED", "true")),
             discovery_min_premium=Decimal(os.environ.get("DISCOVERY_MIN_PREMIUM", "250000")),
             max_discovered_tickers=int(os.environ.get("MAX_DISCOVERED_TICKERS", "20")),
             flow_min_premium=Decimal(os.environ.get("FLOW_MIN_PREMIUM", "100000")),

@@ -79,15 +79,14 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument(
-        "--dynamic-exits",
+        "--static-exits",
         action="store_true",
         default=False,
         help=(
-            "Enable the dynamic exit adjustments (IV scaling, momentum confirmation, "
-            "gamma-wall structure, thesis-confidence decay, earnings-gap awareness) "
-            "instead of the original static thresholds. Off by default so a plain "
-            "invocation reproduces the pre-existing static baseline — run once without "
-            "this flag and once with it over the same window to compare."
+            "Use the original static exit thresholds instead of the dynamic adjustments "
+            "(IV scaling, momentum confirmation, gamma-wall structure, thesis-confidence "
+            "decay, earnings-gap awareness) that are on by default — matching live. Run "
+            "once without this flag and once with it over the same window to compare."
         ),
     )
     p.add_argument("--json", action="store_true", help="Print metrics as JSON")
@@ -295,7 +294,7 @@ def main() -> None:
     policy = StandardPolicy(
         min_composite_score=args.min_composite,
         bypass_flow_gate=args.bypass_flow_gate,
-        exit_monitor=ExitMonitor(dynamic_exits_enabled=args.dynamic_exits),
+        exit_monitor=ExitMonitor(dynamic_exits_enabled=not args.static_exits),
     )
     harness = BacktestHarness(
         policy=policy,

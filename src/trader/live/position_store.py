@@ -38,6 +38,7 @@ def make_position(
         option_instrument_id=instrument_id,
         entry_regime=gs.regime.value,
         entry_setup_type=gs.setup_type,
+        entry_gex_setup=gs,
     )
 
 

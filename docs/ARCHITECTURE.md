@@ -310,6 +310,13 @@ Telegram/dashboard approve button) places without re-running this check —
 `Executor` now takes an optional `risk_engine` and re-verifies immediately
 before `place_option_order` specifically to close that window (see §4).
 
+Gate 2 (`max_concurrent_positions`) currently just drops a candidate that
+would otherwise be tradeable — there is no mechanism today that
+proactively closes a weaker held position to make room for a better one.
+A "replace weakest position" feature is planned but **not built**; see
+[`docs/CAPITAL_REALLOCATION.md`](CAPITAL_REALLOCATION.md) for the design
+and validation status before assuming this exists.
+
 ---
 
 ## 4. Execution — `execute_orders` / `Executor`

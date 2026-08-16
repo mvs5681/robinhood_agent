@@ -69,6 +69,37 @@ record (see CHANGELOG 2026-08-15).
       hourly refresh — zero extra UW calls, just persisting more of what's
       already fetched. Would raise the ceiling on how precise v2's matching
       above can be.
+- [ ] **Fix `StandardPolicy.should_exit()` never firing `THESIS_INVALIDATED`**
+      — it calls `ExitMonitor.evaluate()` without ever passing a live
+      `current_setup`, so that check can structurally never trigger in a
+      backtest replay, even though the live equivalent
+      (`ExitLoop._current_gex_setup()`) works correctly today. Found while
+      validating the capital-reallocation idea — see
+      `docs/CAPITAL_REALLOCATION.md` §2/§3 Phase 0. Improves backtest
+      fidelity generally, not just for that initiative; worth fixing
+      regardless of whether that initiative proceeds further.
+
+## Capital reallocation ("replace weakest position") — planning only
+
+See [`docs/CAPITAL_REALLOCATION.md`](docs/CAPITAL_REALLOCATION.md) for the
+full plan, validation data, and open design questions. No code has been
+built for this yet — tracked here so the phase gates aren't lost.
+
+- [ ] Phase 0: fix `StandardPolicy.should_exit()`'s missing thesis
+      invalidation (tracked above — it's the prerequisite gate for this
+      whole initiative, not just a nice-to-have).
+- [ ] Phase 0 gate: re-run the scarcity analysis from
+      `docs/CAPITAL_REALLOCATION.md` §2 after that fix. Only proceed below
+      if real, non-noise score gaps remain.
+- [ ] Phase 2: design the replacement mechanism in detail (trigger,
+      live re-scoring, replacement bar, guardrails, new `ExitReason`) —
+      draft already in `docs/CAPITAL_REALLOCATION.md` §4, needs the
+      Phase 0 data before finalizing thresholds.
+- [ ] Phase 3: shadow mode — log proposed replacements without ever
+      executing them; review a real period before considering Phase 4.
+- [ ] Phase 4: gated live rollout, `rh_approval`-confirmed first;
+      autonomous only after a track record. Not the default outcome —
+      contingent on Phase 3's review.
 
 ## Later / nice to have
 

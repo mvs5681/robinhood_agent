@@ -17,7 +17,11 @@ from trader.uw.schemas import InterpolatedIVEntry, OptionContract, TechnicalPoin
 
 AS_OF = datetime(2026, 6, 30, 15, 0, 0, tzinfo=timezone.utc)
 
-DEFAULT_MONITOR = ExitMonitor(stop_loss_pct=0.35, dte_floor=7)
+# dynamic_exits_enabled=True: most test classes below exercise the dynamic
+# adjustments (IV scaling, momentum, gamma-wall structure, thesis-confidence
+# decay, earnings/liquidity) via this shared monitor. TestDynamicExitsDisabled
+# constructs its own monitor with the switch off to verify the static baseline.
+DEFAULT_MONITOR = ExitMonitor(stop_loss_pct=0.35, dte_floor=7, dynamic_exits_enabled=True)
 
 
 def _contract() -> OptionContract:
@@ -402,7 +406,8 @@ class TestThesisConfidenceDecay:
         assert result is None
 
     def test_custom_decay_pct_and_wall_drift_pct(self):
-        monitor = ExitMonitor(thesis_confidence_decay_pct=0.80, thesis_wall_drift_pct=0.10)
+        monitor = ExitMonitor(thesis_confidence_decay_pct=0.80, thesis_wall_drift_pct=0.10,
+                               dynamic_exits_enabled=True)
         entry_setup = _setup(direction="call", confidence=0.6, call_wall=_wall("0.02"))
         pos = _position(target_level="500", entry_gex_setup=entry_setup)
         # confidence 0.40 would pass the default 0.30 floor but fails the
@@ -524,7 +529,7 @@ class TestIVScaledThresholds:
         assert result is None
 
     def test_zero_max_adjustment_disables_scaling_even_at_extreme_iv(self):
-        monitor = ExitMonitor(iv_scale_max_adjustment_pct=0.0)
+        monitor = ExitMonitor(iv_scale_max_adjustment_pct=0.0, dynamic_exits_enabled=True)
         pos = _position(target_level="200")
         result = monitor.evaluate(
             pos, current_price=Decimal("196"), current_premium=Decimal("3.50"), dte=14, as_of=AS_OF,
@@ -621,7 +626,7 @@ class TestMomentumConfirmation:
         assert with_momentum is None
 
     def test_zero_adjustment_disables_momentum_effect(self):
-        monitor = ExitMonitor(momentum_wall_adjustment_pct=0.0)
+        monitor = ExitMonitor(momentum_wall_adjustment_pct=0.0, dynamic_exits_enabled=True)
         pos = _position(target_level="200")
         result = monitor.evaluate(
             pos, current_price=Decimal("196"), current_premium=Decimal("3.50"),
@@ -803,7 +808,7 @@ class TestLiquidityAwareness:
         assert result is None
 
     def test_zero_adjustment_disables_liquidity_effect(self):
-        monitor = ExitMonitor(liquidity_wall_adjustment_pct=0.0)
+        monitor = ExitMonitor(liquidity_wall_adjustment_pct=0.0, dynamic_exits_enabled=True)
         pos = _position(target_level="200")
         result = monitor.evaluate(
             pos, current_price=Decimal("196"), current_premium=Decimal("3.50"), dte=14, as_of=AS_OF,

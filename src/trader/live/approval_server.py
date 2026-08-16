@@ -1299,6 +1299,8 @@ function refreshAll() {
 
 // ── Settings tab ──────────────────────────────────────────────────────
 const SETTINGS_FIELDS = [
+  {key:'dynamic_exits_enabled', label:'Dynamic Exits Enabled', type:'checkbox',
+   hint:'Master switch for all dynamic exit adjustments below (IV scaling, momentum confirmation, gamma-wall structure, thesis-confidence decay, earnings/liquidity awareness). Off = original static thresholds only. Validate in backtest before enabling live.'},
   {key:'seed_tickers', label:'Seed Tickers', type:'text',
    hint:'Comma-separated; always scanned every cycle, exempt from the premium threshold (e.g. SPY,QQQ,SPX)'},
   {key:'discovery_min_premium', label:'Discovery Min Premium ($)', type:'number',
@@ -1317,6 +1319,24 @@ const SETTINGS_FIELDS = [
    hint:'Gain over entry required before the trailing stop arms (0.05–3.0, e.g. 0.30 = 30%)'},
   {key:'trailing_stop_giveback_pct', label:'Trailing Stop Giveback (fraction)', type:'number', step:'0.01',
    hint:'Once armed, exit after giving back this fraction of the peak gain (0.05–0.95, e.g. 0.50 = 50%)'},
+  {key:'thesis_confidence_decay_pct', label:'Thesis Confidence Decay (fraction)', type:'number', step:'0.01',
+   hint:'Exit if live GEX structure_confidence falls below this fraction of its entry-time value (0.05–0.95, e.g. 0.50 = 50%)'},
+  {key:'thesis_wall_drift_pct', label:'Thesis Wall Drift (fraction)', type:'number', step:'0.05',
+   hint:'Exit if the held-side GEX wall retreats by more than this fraction vs its entry-time distance (0.10–5.0, e.g. 1.0 = wall distance doubled)'},
+  {key:'iv_scale_max_adjustment_pct', label:'IV Scale Max Adjustment (fraction)', type:'number', step:'0.05',
+   hint:'Scales wall proximity / stop loss / trailing giveback by up to ±this fraction around IV percentile 50 (0.0 disables, 0.8 = up to ±80%)'},
+  {key:'momentum_wall_adjustment_pct', label:'Momentum Wall Adjustment (fraction)', type:'number', step:'0.05',
+   hint:'Narrows the profit-target band by this fraction when RSI+MACD confirm continuation, widens it when they warn of reversal (0.0 disables)'},
+  {key:'momentum_rsi_confirm_threshold', label:'Momentum RSI Confirm Threshold', type:'number', step:'1',
+   hint:'RSI level (calls: ≥, puts: mirrored ≤ 100-x) treated as confirming continued momentum (50–90)'},
+  {key:'momentum_rsi_diverge_threshold', label:'Momentum RSI Diverge Threshold', type:'number', step:'1',
+   hint:'RSI level (calls: ≤, puts: mirrored ≥ 100-x) treated as warning of reversal (10–50)'},
+  {key:'earnings_buffer_days', label:'Earnings Buffer (days)', type:'number',
+   hint:'Within this many days of earnings, lock in a profitable position early; hold (without IV-widened stop) if at a loss (0–10)'},
+  {key:'liquidity_spread_widen_threshold_pct', label:'Liquidity Spread Widen Threshold (fraction)', type:'number', step:'0.01',
+   hint:'Bid-ask spread (as a fraction of mid) above which the profit-target band widens and exit orders bias toward the bid (0.01–1.0, e.g. 0.15 = 15%)'},
+  {key:'liquidity_wall_adjustment_pct', label:'Liquidity Wall Adjustment (fraction)', type:'number', step:'0.05',
+   hint:'How much the profit-target band widens once the spread threshold above is breached (0.0 disables, 0.8 = up to 80%)'},
   {key:'selector_dte_min', label:'Contract Selector DTE Min (days)', type:'number',
    hint:'Minimum days-to-expiry when selecting contracts (default 21)'},
   {key:'selector_dte_max', label:'Contract Selector DTE Max (days)', type:'number',
@@ -1340,6 +1360,16 @@ async function loadSettings() {
         Changes apply from the next scan / poll cycle — no restart needed. Saved to disk, so they survive restarts and override .env values.
       </div>
       ${SETTINGS_FIELDS.map(f => {
+        if (f.type === 'checkbox') {
+          const checked = cfg[f.key] ? 'checked' : '';
+          return `<div style="margin-bottom:14px">
+            <label style="display:flex;align-items:center;gap:8px;font-size:12px;font-weight:600">
+              <input id="set-${f.key}" type="checkbox" ${checked}>
+              ${f.label}
+            </label>
+            <div style="font-size:11px;color:var(--muted);margin-top:3px">${f.hint}</div>
+          </div>`;
+        }
         const val = f.key === 'seed_tickers' ? (cfg[f.key]||[]).join(',') : (cfg[f.key] ?? '');
         return `<div style="margin-bottom:14px">
           <label style="display:block;font-size:12px;font-weight:600;margin-bottom:3px">${f.label}</label>
@@ -1361,7 +1391,8 @@ async function saveSettings() {
   const status = document.getElementById('settings-status');
   const body = {};
   for (const f of SETTINGS_FIELDS) {
-    body[f.key] = document.getElementById('set-' + f.key).value;
+    const el = document.getElementById('set-' + f.key);
+    body[f.key] = f.type === 'checkbox' ? String(el.checked) : el.value;
   }
   status.style.color = 'var(--muted)';
   status.textContent = 'Saving…';

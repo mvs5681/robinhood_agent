@@ -101,11 +101,23 @@ record (see CHANGELOG 2026-08-15).
       `_maybe_roll_day()` now checks for a day rollover live, on every
       `check()`/`record_pnl()`, not only at `RiskEngine.__init__`. See
       CHANGELOG 2026-08-15.
-- [ ] Exit loop currently checks thesis invalidation via a simple
+- [x] Exit loop currently checks thesis invalidation via a simple
       direction-flip rule (live `candidate_direction` vs. the held contract's
       type). Consider also comparing wall distance/structure confidence
       drift from entry for earlier, more nuanced invalidation — would need
       Position to retain the entry-time GEXSetup snapshot.
+      Done as part of the dynamic-exits work: `Position.entry_gex_setup` now
+      holds the entry snapshot, and `ExitMonitor._thesis_confidence_decayed`
+      exits on confidence-decay/wall-drift even without a full direction
+      flip. Gated behind `LiveConfig.dynamic_exits_enabled` (default False —
+      validate in backtest before flipping on live).
+- [ ] Earnings-gap and liquidity-aware exits (new in the dynamic-exits work)
+      are live-only: `days_to_earnings`/`spread_pct` come from RH
+      `get_earnings_calendar`/`get_option_price_book`, neither threaded into
+      `BacktestDataSlice` — `StandardPolicy.should_exit` never passes them,
+      so these two gates can't be backtested against existing history. Same
+      current-data-only limitation as flow alerts/darkpool above; would need
+      a new daily capture source for earnings dates + EOD price-book snapshots.
 - [x] Fix autonomous-mode duplicate-signal dedup — `_recent_attempts` now
       gates all three execution modes uniformly (was a no-op for autonomous,
       63 repeated buying-power rejections in one afternoon).

@@ -20,8 +20,19 @@ logger = logging.getLogger(__name__)
 
 _TICKER_RE = re.compile(r"^[A-Z][A-Z0-9.\-]{0,9}$")
 
+def _parse_bool(v: object) -> bool:
+    if isinstance(v, bool):
+        return v
+    return str(v).strip().lower() in ("true", "1", "yes", "on")
+
+
 # field → (parser, validator, human description of the constraint)
 _FIELDS: dict[str, tuple] = {
+    "dynamic_exits_enabled": (
+        _parse_bool,
+        lambda v: True,
+        "must be true or false",
+    ),
     "discovery_min_premium": (
         lambda v: Decimal(str(v)),
         lambda v: v > 0,
@@ -62,6 +73,51 @@ _FIELDS: dict[str, tuple] = {
         lambda v: 0.05 <= v <= 0.95,
         "must be between 0.05 (5%) and 0.95 (95%)",
     ),
+    "thesis_confidence_decay_pct": (
+        float,
+        lambda v: 0.05 <= v <= 0.95,
+        "must be between 0.05 (5%) and 0.95 (95%)",
+    ),
+    "thesis_wall_drift_pct": (
+        float,
+        lambda v: 0.10 <= v <= 5.0,
+        "must be between 0.10 (10%) and 5.0 (500%)",
+    ),
+    "iv_scale_max_adjustment_pct": (
+        float,
+        lambda v: 0.0 <= v <= 0.8,
+        "must be between 0.0 (disabled) and 0.8 (80%)",
+    ),
+    "momentum_wall_adjustment_pct": (
+        float,
+        lambda v: 0.0 <= v <= 0.8,
+        "must be between 0.0 (disabled) and 0.8 (80%)",
+    ),
+    "momentum_rsi_confirm_threshold": (
+        float,
+        lambda v: 50.0 < v <= 90.0,
+        "must be between 50 (exclusive) and 90",
+    ),
+    "momentum_rsi_diverge_threshold": (
+        float,
+        lambda v: 10.0 <= v < 50.0,
+        "must be between 10 and 50 (exclusive)",
+    ),
+    "earnings_buffer_days": (
+        int,
+        lambda v: 0 <= v <= 10,
+        "must be between 0 and 10",
+    ),
+    "liquidity_spread_widen_threshold_pct": (
+        float,
+        lambda v: 0.01 <= v <= 1.0,
+        "must be between 0.01 (1%) and 1.0 (100%)",
+    ),
+    "liquidity_wall_adjustment_pct": (
+        float,
+        lambda v: 0.0 <= v <= 0.8,
+        "must be between 0.0 (disabled) and 0.8 (80%)",
+    ),
     "seed_tickers": (
         lambda v: [t.strip().upper() for t in (v.split(",") if isinstance(v, str) else v) if t.strip()],
         lambda v: len(v) <= 20 and all(_TICKER_RE.match(t) for t in v),
@@ -92,6 +148,14 @@ _FIELDS: dict[str, tuple] = {
 
 @dataclass
 class LiveConfig:
+    # Master switch for the dynamic exit adjustments (IV scaling, momentum
+    # confirmation, gamma-wall structure, thesis-confidence decay, earnings/
+    # liquidity awareness) added on top of the original static thresholds.
+    # Defaults OFF: shipping this code must not silently change live trading
+    # behavior — enable only after validating in backtest, matching the
+    # project's "never enable new automated behavior without explicit
+    # approval + passing backtest" rule.
+    dynamic_exits_enabled: bool = False
     discovery_min_premium: Decimal = Decimal("250000")
     max_discovered_tickers: int = 20
     flow_min_premium: Decimal = Decimal("100000")
@@ -100,6 +164,15 @@ class LiveConfig:
     wall_proximity_pct: float = 0.015
     trailing_stop_activation_pct: float = 0.30
     trailing_stop_giveback_pct: float = 0.50
+    thesis_confidence_decay_pct: float = 0.50
+    thesis_wall_drift_pct: float = 1.0
+    iv_scale_max_adjustment_pct: float = 0.50
+    momentum_wall_adjustment_pct: float = 0.50
+    momentum_rsi_confirm_threshold: float = 55.0
+    momentum_rsi_diverge_threshold: float = 45.0
+    earnings_buffer_days: int = 2
+    liquidity_spread_widen_threshold_pct: float = 0.15
+    liquidity_wall_adjustment_pct: float = 0.50
     seed_tickers: list[str] = field(default_factory=list)
     # Contract selector window — kept in sync with SelectorParams defaults
     selector_dte_min: int = 21
@@ -111,6 +184,7 @@ class LiveConfig:
     @classmethod
     def from_env(cls, path: Path | str | None = None) -> "LiveConfig":
         cfg = cls(
+            dynamic_exits_enabled=_parse_bool(os.environ.get("DYNAMIC_EXITS_ENABLED", "false")),
             discovery_min_premium=Decimal(os.environ.get("DISCOVERY_MIN_PREMIUM", "250000")),
             max_discovered_tickers=int(os.environ.get("MAX_DISCOVERED_TICKERS", "20")),
             flow_min_premium=Decimal(os.environ.get("FLOW_MIN_PREMIUM", "100000")),
@@ -119,6 +193,19 @@ class LiveConfig:
             wall_proximity_pct=float(os.environ.get("WALL_PROXIMITY_PCT", "0.015")),
             trailing_stop_activation_pct=float(os.environ.get("TRAILING_STOP_ACTIVATION_PCT", "0.30")),
             trailing_stop_giveback_pct=float(os.environ.get("TRAILING_STOP_GIVEBACK_PCT", "0.50")),
+            thesis_confidence_decay_pct=float(os.environ.get("THESIS_CONFIDENCE_DECAY_PCT", "0.50")),
+            thesis_wall_drift_pct=float(os.environ.get("THESIS_WALL_DRIFT_PCT", "1.0")),
+            iv_scale_max_adjustment_pct=float(os.environ.get("IV_SCALE_MAX_ADJUSTMENT_PCT", "0.50")),
+            momentum_wall_adjustment_pct=float(os.environ.get("MOMENTUM_WALL_ADJUSTMENT_PCT", "0.50")),
+            momentum_rsi_confirm_threshold=float(os.environ.get("MOMENTUM_RSI_CONFIRM_THRESHOLD", "55.0")),
+            momentum_rsi_diverge_threshold=float(os.environ.get("MOMENTUM_RSI_DIVERGE_THRESHOLD", "45.0")),
+            earnings_buffer_days=int(os.environ.get("EARNINGS_BUFFER_DAYS", "2")),
+            liquidity_spread_widen_threshold_pct=float(
+                os.environ.get("LIQUIDITY_SPREAD_WIDEN_THRESHOLD_PCT", "0.15")
+            ),
+            liquidity_wall_adjustment_pct=float(
+                os.environ.get("LIQUIDITY_WALL_ADJUSTMENT_PCT", "0.50")
+            ),
             seed_tickers=[t.strip().upper() for t in os.environ.get("TICKERS", "").split(",") if t.strip()],
             path=Path(path) if path else None,
         )
@@ -174,6 +261,7 @@ class LiveConfig:
 
     def to_dict(self) -> dict:
         return {
+            "dynamic_exits_enabled": self.dynamic_exits_enabled,
             "discovery_min_premium": str(self.discovery_min_premium),
             "max_discovered_tickers": self.max_discovered_tickers,
             "flow_min_premium": str(self.flow_min_premium),
@@ -182,6 +270,15 @@ class LiveConfig:
             "wall_proximity_pct": self.wall_proximity_pct,
             "trailing_stop_activation_pct": self.trailing_stop_activation_pct,
             "trailing_stop_giveback_pct": self.trailing_stop_giveback_pct,
+            "thesis_confidence_decay_pct": self.thesis_confidence_decay_pct,
+            "thesis_wall_drift_pct": self.thesis_wall_drift_pct,
+            "iv_scale_max_adjustment_pct": self.iv_scale_max_adjustment_pct,
+            "momentum_wall_adjustment_pct": self.momentum_wall_adjustment_pct,
+            "momentum_rsi_confirm_threshold": self.momentum_rsi_confirm_threshold,
+            "momentum_rsi_diverge_threshold": self.momentum_rsi_diverge_threshold,
+            "earnings_buffer_days": self.earnings_buffer_days,
+            "liquidity_spread_widen_threshold_pct": self.liquidity_spread_widen_threshold_pct,
+            "liquidity_wall_adjustment_pct": self.liquidity_wall_adjustment_pct,
             "seed_tickers": self.seed_tickers,
             "selector_dte_min": self.selector_dte_min,
             "selector_dte_max": self.selector_dte_max,

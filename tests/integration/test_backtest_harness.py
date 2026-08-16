@@ -214,6 +214,10 @@ class TestHarnessRun:
         assert date(2026, 1, 2) in entry_dates
 
     async def test_profit_target_fires_on_day_two(self, result: BacktestResult):
+        # dynamic_exits_enabled defaults False (StandardPolicy()'s bare
+        # ExitMonitor()) — static behavior: gate 1 uses the entry-snapshotted
+        # target_level (200) unconditionally, and day 2's spot (201.50) has
+        # already crossed it.
         closed = [r for r in result.records if r.status == "closed"]
         assert len(closed) >= 1
         profit_targets = [
@@ -221,15 +225,15 @@ class TestHarnessRun:
         ]
         assert len(profit_targets) >= 1
 
+    async def test_exit_date_is_day_two(self, result: BacktestResult):
+        closed = [r for r in result.records if r.status == "closed"]
+        assert any(r.exit_date == date(2026, 1, 5) for r in closed)
+
     async def test_profit_target_exit_is_positive_pnl(self, result: BacktestResult):
         closed = [r for r in result.records if r.status == "closed"]
         for record in closed:
             if record.exit_signal.reason == ExitReason.PROFIT_TARGET:
                 assert record.pnl_pct > 0
-
-    async def test_exit_date_is_day_two(self, result: BacktestResult):
-        closed = [r for r in result.records if r.status == "closed"]
-        assert any(r.exit_date == date(2026, 1, 5) for r in closed)
 
     async def test_win_rate_positive(self, result: BacktestResult):
         if result.overall.closed_count > 0:
@@ -265,6 +269,32 @@ class TestHarnessRun:
             assert record.candidate is not None
             assert record.position is not None
             assert record.entry_date is not None
+
+
+# ---------------------------------------------------------------------------
+# Dynamic exits (dynamic_exits_enabled=True) — same fixture, different policy
+# ---------------------------------------------------------------------------
+
+
+class TestHarnessRunWithDynamicExits:
+    async def test_holds_past_entry_wall_when_live_wall_advances(self, store: DataStore):
+        # With dynamic exits on, gate 1 resolves the *live* wall each tick
+        # instead of the frozen entry snapshot. Day 2 spot (201.50) crosses
+        # the entry-snapshotted wall (200), but that day's live spot_gex
+        # shows a bigger wall at 210 (600M gamma vs 400M at 205) now that 200
+        # has dropped below spot — the position holds for that wall instead
+        # of taking the small early profit at the stale entry snapshot, so
+        # the day-2 entry doesn't close within the fixture's 2-day window.
+        from trader.exits.monitor import ExitMonitor
+
+        policy = StandardPolicy(exit_monitor=ExitMonitor(dynamic_exits_enabled=True))
+        harness = BacktestHarness(policy, DataStore(HISTORY_ROOT), START, END, TICKERS)
+        result = await harness.run()
+
+        first = result.records[0]
+        assert first.entry_date == date(2026, 1, 2)
+        assert first.position.target_level == Decimal("200")  # entry snapshot, unchanged
+        assert first.status != "closed"
 
 
 # ---------------------------------------------------------------------------

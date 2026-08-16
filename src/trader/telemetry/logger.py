@@ -444,6 +444,9 @@ class TelemetryLogger:
         quantity: int = 1,
         entry_regime: str | None = None,
         entry_setup_type: str | None = None,
+        iv_percentile: float | None = None,
+        rsi: float | None = None,
+        macd_histogram: float | None = None,
     ) -> None:
         self.emit(
             "exit_signal",
@@ -459,4 +462,7 @@ class TelemetryLogger:
             quantity=quantity,
             entry_regime=entry_regime,
             entry_setup_type=entry_setup_type,
+            iv_percentile=iv_percentile,
+            rsi=rsi,
+            macd_histogram=macd_histogram,
         )

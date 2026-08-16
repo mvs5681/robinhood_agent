@@ -44,6 +44,8 @@ ALLOWED_RH_TOOL_NAMES: frozenset[str] = frozenset([
     "get_portfolio",
     "get_equity_quotes",
     "get_option_quotes",
+    "get_earnings_calendar",
+    "get_option_price_book",
 ])
 
 

@@ -11,7 +11,12 @@ What gets captured:
   {TICKER}_spot_gex.json   — gamma exposure by strike
   {TICKER}_darkpool.json   — dark pool prints
   {TICKER}_net_prem_ticks.json — net premium per strike
-  {TICKER}_option_contracts.json — live options chain (DTE 21-30)
+  {TICKER}_option_contracts.json — raw options chain (an arbitrary ~50
+      contracts, whatever UW's endpoint returns that day — not reliably
+      any particular DTE window), augmented with a targeted
+      get_options_screener call per open position so its exact
+      strike/expiry/type stays present in the snapshot for as long as the
+      position is held, not just at entry
   {TICKER}_technicals_RSI.json  — RSI daily
   {TICKER}_technicals_MACD.json — MACD daily
 
@@ -24,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections import defaultdict
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -38,6 +44,8 @@ except Exception:
 
 if TYPE_CHECKING:
     from langchain_core.tools import BaseTool
+    from trader.live.position_store import PositionStore
+    from trader.uw.schemas import OptionContract
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +82,7 @@ async def capture_day(
     seeds: list[str],
     min_premium: int = _DEFAULT_MIN_PREMIUM,
     max_tickers: int = _DEFAULT_MAX_TICKERS,
+    position_store: "PositionStore | None" = None,
 ) -> None:
     """
     Save today's UW snapshot into history_dir/YYYY-MM-DD/.
@@ -117,10 +126,19 @@ async def capture_day(
     except Exception as exc:
         logger.warning("CaptureLoop: flow alert discovery failed: %s", exc)
 
-    # Merge seeds + discovered, cap count
+    # Held-position tickers first — never truncated out by max_tickers below,
+    # since keeping their exact contract capturable for the life of the
+    # position matters more than discovery breadth (see TODO.md: the same
+    # "keep held tickers live" principle already applied to GEXCache).
+    held_by_ticker: dict[str, list["OptionContract"]] = defaultdict(list)
+    if position_store is not None:
+        for pos in await position_store.all():
+            held_by_ticker[pos.ticker].append(pos.contract)
+
+    # Merge held + seeds + discovered, cap count
     seen: set[str] = set()
     tickers: list[str] = []
-    for t in seeds + discovered:
+    for t in list(held_by_ticker.keys()) + seeds + discovered:
         if t not in seen:
             seen.add(t)
             tickers.append(t)
@@ -133,14 +151,14 @@ async def capture_day(
     logger.info("CaptureLoop: %s — tickers: %s", trade_date, tickers)
 
     # ── Per-ticker ───────────────────────────────────────────────────────────
-    async def _save(filename: str, tool_name: str, kwargs: dict) -> None:
-        async with sem:
-            raw = await _uw_call(tools[tool_name], kwargs)
-        (day_dir / filename).write_text(json.dumps(raw))
-
     ticker_tasks = []
     for ticker in tickers:
-        ticker_tasks.append(_capture_ticker(tools, ticker, day_dir, date_str, sem))
+        ticker_tasks.append(
+            _capture_ticker(
+                tools, ticker, day_dir, date_str, sem,
+                held_contracts=held_by_ticker.get(ticker),
+            )
+        )
     await asyncio.gather(*ticker_tasks, return_exceptions=True)
 
     logger.info("CaptureLoop: %s complete → %s", trade_date, day_dir)
@@ -152,6 +170,7 @@ async def _capture_ticker(
     day_dir: Path,
     date_str: str,
     sem: asyncio.Semaphore,
+    held_contracts: list["OptionContract"] | None = None,
 ) -> None:
     async def _save(filename: str, tool_name: str, kwargs: dict) -> None:
         async with sem:
@@ -164,8 +183,17 @@ async def _capture_ticker(
                 {"ticker_symbol": ticker, "limit": 100})
     await _save(f"{ticker}_net_prem_ticks.json", "get_flow_per_strike",
                 {"ticker": ticker, "date": date_str})
-    await _save(f"{ticker}_option_contracts.json", "get_options_chain",
-                {"ticker": ticker, "limit": 50})
+
+    async with sem:
+        chain_raw = await _uw_call(tools["get_options_chain"], {"ticker": ticker, "limit": 50})
+    chain_data = list(chain_raw.get("data") or [])
+
+    if held_contracts and "get_options_screener" in tools:
+        chain_data = await _augment_with_held_contracts(
+            tools, ticker, date_str, chain_data, held_contracts, sem,
+        )
+
+    (day_dir / f"{ticker}_option_contracts.json").write_text(json.dumps({"data": chain_data}))
 
     for fn in ("RSI", "MACD"):
         await _save(
@@ -175,6 +203,62 @@ async def _capture_ticker(
         )
 
     logger.debug("CaptureLoop: %s done", ticker)
+
+
+async def _augment_with_held_contracts(
+    tools: dict[str, "BaseTool"],
+    ticker: str,
+    date_str: str,
+    chain_data: list[dict],
+    held_contracts: list["OptionContract"],
+    sem: asyncio.Semaphore,
+) -> list[dict]:
+    """Merge in a targeted get_options_screener fetch per open position so its
+    exact contract stays present in the day's snapshot even once its DTE has
+    drifted outside whatever window the raw get_options_chain call happens to
+    return that day (an "arbitrary ~50 contracts", not a guaranteed range —
+    see docs/ARCHITECTURE.md §2). Without this, should_exit()'s
+    get_option_premium lookup goes None for an aging held position and every
+    exit check — including thesis invalidation — silently stops firing for
+    that day in backtest replay."""
+    from trader.uw.validators import parse_option_contracts
+
+    try:
+        existing = {
+            (c.strike, c.expiry, c.type)
+            for c in parse_option_contracts({"data": chain_data})
+        }
+    except Exception:
+        existing = set()
+
+    trade_date = date.fromisoformat(date_str)
+    merged = list(chain_data)
+    fetched_windows: set[tuple[int, str]] = set()
+    for contract in held_contracts:
+        if (contract.strike, contract.expiry, contract.type) in existing:
+            continue
+        dte = (contract.expiry - trade_date).days
+        if dte < 0:
+            continue
+        window_key = (dte, contract.type)
+        if window_key in fetched_windows:
+            continue
+        fetched_windows.add(window_key)
+
+        is_call = contract.type == "call"
+        async with sem:
+            extra_raw = await _uw_call(tools["get_options_screener"], {
+                "ticker_symbol": ticker,
+                "min_dte": str(max(dte - 1, 0)),
+                "max_dte": str(dte + 1),
+                "type": "Calls" if is_call else "Puts",
+                "min_delta": "0.01" if is_call else "-1",
+                "max_delta": "1" if is_call else "-0.01",
+                "limit": 50,
+            })
+        merged.extend(extra_raw.get("data") or [])
+
+    return merged
 
 
 class CaptureLoop:
@@ -190,12 +274,14 @@ class CaptureLoop:
         seeds: list[str] | None = None,
         min_premium: int = _DEFAULT_MIN_PREMIUM,
         max_tickers: int = _DEFAULT_MAX_TICKERS,
+        position_store: "PositionStore | None" = None,
     ) -> None:
         self._tools = uw_tools
         self._history_dir = Path(history_dir)
         self._seeds = list(seeds or [])
         self._min_premium = min_premium
         self._max_tickers = max_tickers
+        self._position_store = position_store
 
     async def run(self) -> None:
         while True:
@@ -220,6 +306,7 @@ class CaptureLoop:
                     self._seeds,
                     self._min_premium,
                     self._max_tickers,
+                    position_store=self._position_store,
                 )
             except Exception as exc:
                 logger.error("CaptureLoop: capture failed for %s: %s", today, exc)

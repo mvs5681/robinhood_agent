@@ -42,19 +42,39 @@ the premise that capital efficiency matters here). 82 "scarcity events"
 gap over 0.15 versus the weakest held position.
 
 **But most of that raw signal turned out to be an artifact, not real
-edge.** Every one of the large-gap events (7/23–7/30) showed the same
-held position (`NFLX`) re-scoring at a composite of exactly `0.000` —
-`BlendScorer`'s MIXED-regime/no-structure floor — for a full week without
-ever exiting. That's not a genuinely-competitive-but-slightly-behind
+edge.** Every one of the large-gap events (7/23–7/30, and recurring again
+7/31–8/05 against a different ticker) showed the same held position
+(`NFLX`, then `IBIT`) re-scoring at a composite of exactly `0.000` —
+`BlendScorer`'s MIXED-regime/no-structure floor — for roughly a week
+without ever exiting. That's not a genuinely-competitive-but-slightly-behind
 position; that's a position whose thesis had structurally broken and
-should have been closed by `THESIS_INVALIDATED` days earlier. We traced
-this to a confirmed, separate bug: `StandardPolicy.should_exit()`
-(`src/trader/backtest/policy.py`) calls `ExitMonitor.evaluate()` without
-ever passing a live `current_setup` — so the one line in
-`ExitMonitor._first_triggered()` that fires `THESIS_INVALIDATED` can
-structurally never execute in a backtest replay, even though the
-equivalent live check (`ExitLoop._current_gex_setup()`) works correctly
-today (`docs/ARCHITECTURE.md` §7).
+should have been closed by `THESIS_INVALIDATED` days earlier.
+
+This turned out to have **two stacked causes**, not one:
+
+1. `StandardPolicy.should_exit()` (`src/trader/backtest/policy.py`) used
+   to call `ExitMonitor.evaluate()` without ever passing a live
+   `current_setup` — so the one line in `ExitMonitor._first_triggered()`
+   that fires `THESIS_INVALIDATED` could structurally never execute in a
+   backtest replay, even though the equivalent live check
+   (`ExitLoop._current_gex_setup()`) worked correctly. **Fixed** — landed
+   incidentally as part of the dynamic-exits work (#21), before this
+   initiative got back to it.
+2. Fixing (1) alone didn't stop the artifact. Re-tracing the exact same
+   `IBIT` position confirmed `current_setup` now correctly resolves to
+   `(MIXED, direction='none')` on the day the score craters — which
+   *should* trigger `THESIS_INVALIDATED` — but `should_exit()` never got
+   that far: `get_option_premium()` returned `None` for the held
+   contract, because that day's `{ticker}_option_contracts.json` (raw
+   `get_options_chain` output — an *arbitrary* ~50 contracts, not a
+   guaranteed DTE window) no longer happened to include the position's
+   exact strike/expiry as it aged. `should_exit()`'s
+   `if current_price is None or current_premium is None: return None`
+   guard then suppressed every exit check that day, thesis invalidation
+   included. **Fixed** — `CaptureLoop` now threads `PositionStore` in and
+   backfills any missing held contract via a targeted
+   `get_options_screener` call (`docs/ARCHITECTURE.md` §8). Only affects
+   captures made from here forward.
 
 Once those artifact days are set aside, the genuine remainder (8/3
 onward, a real structurally-valid held position, `HPE`, scoring 0.55–0.75)
@@ -65,17 +85,23 @@ in that portion of the data.
 
 **Reading**: the premise (capital is chronically scarce) holds up. The
 proposed mechanism (compare-and-replace) is not obviously where the
-missing edge actually is — most of the apparent opportunity is a symptom
-of a *different*, smaller, already-understood bug (thesis-invalidation
-not firing in backtest replay), not evidence that replacement trading
-itself would add value. Sample-size caveat: 18 days, thin and overlapping
-ticker coverage, flow gate bypassed — directional, not definitive.
+missing edge actually is — most of the apparent opportunity was a symptom
+of two now-fixed backtest-fidelity bugs (thesis-invalidation not firing,
+and held positions silently losing option-chain coverage as they aged),
+not evidence that replacement trading itself would add value. Both fixes
+only apply to captures going forward — the existing 18-day corpus
+predates them and can't be backfilled (current-data-only UW endpoints), so
+**the Phase 0 gate below can't be answered yet**; it needs a fresh window
+of post-fix captures. Sample-size caveat carries forward regardless: thin,
+overlapping ticker coverage, flow gate bypassed — directional, not
+definitive.
 
 ## 3. Phased plan
 
 ```mermaid
 flowchart TD
-    P0["Phase 0 — prerequisite<br/>Fix thesis-invalidation in backtest replay"] --> G0{"Re-run the scarcity<br/>analysis. Real,<br/>non-noise gaps left?"}
+    P0["Phase 0 — prerequisite<br/>Fix exit fidelity in backtest replay<br/>(current_setup wiring + option-chain coverage)<br/>— DONE"] --> WAIT["Wait for a fresh window of<br/>post-fix captures — existing<br/>18-day corpus can't answer the gate"]
+    WAIT --> G0{"Re-run the scarcity<br/>analysis. Real,<br/>non-noise gaps left?"}
     G0 -->|no| STOP["Stop here.<br/>The existing exit chain already<br/>captures the available edge —<br/>ship nothing further."]
     G0 -->|yes| P2["Phase 2 — design<br/>the replacement mechanism"]
     P2 --> P3["Phase 3 — shadow mode<br/>log-only, no execution"]
@@ -84,21 +110,26 @@ flowchart TD
     G3 -->|yes| P4["Phase 4 — gated live rollout<br/>rh_approval-confirmed first,<br/>autonomous only after a track record"]
 ```
 
-### Phase 0 — fix backtest thesis-invalidation fidelity (prerequisite, not optional)
+### Phase 0 — fix backtest exit fidelity (prerequisite, not optional) — **code done, gate pending fresh data**
 
-Thread a live-equivalent `current_setup` into
-`StandardPolicy.should_exit()`, the same `GEXSetup` freshness/staleness
-handling `ExitLoop._current_gex_setup()` already does live. This is a
-small, well-scoped, self-contained fix that improves backtest fidelity for
-**everything** downstream of exit evaluation, not just this initiative —
-worth doing regardless of whether Phases 2–4 ever happen.
+Two fixes landed, both described in §2: threading a live-equivalent
+`current_setup` into `StandardPolicy.should_exit()` (#21), and closing the
+held-position option-chain coverage gap in `CaptureLoop` that was still
+suppressing thesis invalidation even after the first fix. Both improve
+backtest fidelity for **everything** downstream of exit evaluation, not
+just this initiative.
 
-**Gate**: re-run the §2 scarcity analysis after this fix. If the genuine
-(non-artifact) score gaps are still mostly noise, the honest conclusion is
-that the existing exit chain (properly firing) already captures most of
-the available edge, and Phases 2–4 should not be built — the complexity
-and whipsaw/realized-loss risk (§4) wouldn't be justified by the size of
-the opportunity. This gate is a real stop condition, not a formality.
+**Gate**: re-run the §2 scarcity analysis (`scripts/analyze_capital_scarcity.py`)
+once enough *newly*-captured days have accumulated post-fix — the existing
+18-day corpus predates both fixes and can't answer this (re-running it
+today reproduces the same artifact, just confirming the fix doesn't
+retroactively repair already-incomplete history, not that the fix is
+ineffective). If the genuine (non-artifact) score gaps in fresh data are
+still mostly noise, the honest conclusion is that the existing exit chain
+(properly firing) already captures most of the available edge, and Phases
+2–4 should not be built — the complexity and whipsaw/realized-loss risk
+(§4) wouldn't be justified by the size of the opportunity. This gate is a
+real stop condition, not a formality.
 
 ### Phase 2 — mechanism design (only if Phase 0's gate passes)
 

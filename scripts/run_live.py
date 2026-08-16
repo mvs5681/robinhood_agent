@@ -244,6 +244,7 @@ async def main() -> None:
         seeds=seed_tickers,
         min_premium=int(os.environ.get("DISCOVERY_MIN_PREMIUM", "250000")),
         max_tickers=int(os.environ.get("MAX_DISCOVERED_TICKERS", "20")),
+        position_store=position_store,
     )
     backtest_results_file = os.environ.get("BACKTEST_RESULTS_FILE", "data/backtest_results.json")
     backtest_loop = BacktestLoop(

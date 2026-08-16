@@ -493,6 +493,25 @@ internally — the only way to ever recover genuine intraday flow timing.
 **Not yet consumed** by the backtest harness (§9) — that's a deliberately
 deferred follow-up once enough days accumulate.
 
+**Held-position contract coverage**: `{ticker}_option_contracts.json` is
+normally just `get_options_chain`'s raw ~50-contract response — which is
+*not* a guaranteed DTE window, despite how it usually looks; it's whatever
+UW's endpoint returns that day. A position held long enough can age its
+exact strike/expiry/type out of that response entirely, which silently
+breaks `should_exit()` in backtest replay: `get_option_premium()` returns
+`None` for that contract, and `StandardPolicy.should_exit()`'s early guard
+then skips *every* exit check that day — including thesis invalidation
+(§7), even though `current_setup` itself resolves correctly. `CaptureLoop`
+closes this by threading `PositionStore` in: any ticker with an open
+position is added to the day's capture universe ahead of the
+`max_tickers` cap, and if its exact contract isn't already in the raw
+chain response, a targeted `get_options_screener` call (narrow
+`min_dte`/`max_dte` bracketing the position's current DTE, full delta
+range) fetches it and merges the result in before writing the file. Only
+affects captures going forward — the 18-day corpus captured before this
+fix can't be backfilled (`get_options_chain`/`get_options_screener` are
+current-data-only, same limitation as flow alerts/darkpool above).
+
 | File | Written by | Cadence | Format |
 |---|---|---|---|
 | `market_tide.json`, `flow_alerts.json`, `{ticker}_*.json` (7 types) | `CaptureLoop` / `StateCaptureLoop` | once/day, 4:30pm ET | raw MCP envelope or `{"data": [...]}`  — `DataStore` handles both via `_unwrap()` |

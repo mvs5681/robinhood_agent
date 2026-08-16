@@ -69,6 +69,52 @@ record (see CHANGELOG 2026-08-15).
       hourly refresh — zero extra UW calls, just persisting more of what's
       already fetched. Would raise the ceiling on how precise v2's matching
       above can be.
+- [x] Fix `StandardPolicy.should_exit()` never firing `THESIS_INVALIDATED`
+      — landed incidentally as part of the dynamic-exits work (#21):
+      `should_exit()` now threads a live-equivalent `current_setup` into
+      `ExitMonitor.evaluate()`. Re-validating (`docs/CAPITAL_REALLOCATION.md`
+      §2/§3 Phase 0) found the fix alone wasn't sufficient — a second,
+      separate bug (below) still suppressed the check.
+- [x] Fix held positions losing option-chain coverage in backtest replay —
+      `get_option_premium()` needs an exact strike/expiry/type match in
+      that day's `{ticker}_option_contracts.json`, but `get_options_chain`
+      returns an arbitrary ~50 contracts, not a guaranteed DTE window; an
+      aging position's contract can fall out of it entirely, and
+      `should_exit()`'s early guard then skips *every* exit check that day
+      — including the now-correctly-wired thesis invalidation above. This
+      was the actual mechanism behind the "pinned at composite 0.000 for a
+      week without exiting" artifact in `docs/CAPITAL_REALLOCATION.md` §2,
+      not the missing `current_setup` alone. `CaptureLoop` now threads
+      `PositionStore` in and augments the chain with a targeted
+      `get_options_screener` call per held position when its exact contract
+      is missing (`docs/ARCHITECTURE.md` §8). Only affects captures going
+      forward — existing history can't be backfilled (current-data-only
+      endpoints).
+
+## Capital reallocation ("replace weakest position") — planning only
+
+See [`docs/CAPITAL_REALLOCATION.md`](docs/CAPITAL_REALLOCATION.md) for the
+full plan, validation data, and open design questions. No code has been
+built for this yet — tracked here so the phase gates aren't lost.
+
+- [x] Phase 0: fix `StandardPolicy.should_exit()`'s missing thesis
+      invalidation, and the deeper option-chain coverage bug that was
+      actually suppressing it (tracked above).
+- [ ] Phase 0 gate: re-run the scarcity analysis from
+      `docs/CAPITAL_REALLOCATION.md` §2 once enough *newly*-captured days
+      (post-fix) have accumulated. The existing 18-day corpus can't answer
+      this — it predates the capture fix, so the artifact this gate exists
+      to filter out is still baked into that history. Only proceed below
+      if real, non-noise score gaps remain in fresh data.
+- [ ] Phase 2: design the replacement mechanism in detail (trigger,
+      live re-scoring, replacement bar, guardrails, new `ExitReason`) —
+      draft already in `docs/CAPITAL_REALLOCATION.md` §4, needs the
+      Phase 0 data before finalizing thresholds.
+- [ ] Phase 3: shadow mode — log proposed replacements without ever
+      executing them; review a real period before considering Phase 4.
+- [ ] Phase 4: gated live rollout, `rh_approval`-confirmed first;
+      autonomous only after a track record. Not the default outcome —
+      contingent on Phase 3's review.
 
 ## Later / nice to have
 

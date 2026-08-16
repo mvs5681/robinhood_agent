@@ -310,6 +310,13 @@ Telegram/dashboard approve button) places without re-running this check —
 `Executor` now takes an optional `risk_engine` and re-verifies immediately
 before `place_option_order` specifically to close that window (see §4).
 
+Gate 2 (`max_concurrent_positions`) currently just drops a candidate that
+would otherwise be tradeable — there is no mechanism today that
+proactively closes a weaker held position to make room for a better one.
+A "replace weakest position" feature is planned but **not built**; see
+[`docs/CAPITAL_REALLOCATION.md`](CAPITAL_REALLOCATION.md) for the design
+and validation status before assuming this exists.
+
 ---
 
 ## 4. Execution — `execute_orders` / `Executor`
@@ -485,6 +492,25 @@ that snapshot can be many hours stale by the time it's captured (§3b).
 internally — the only way to ever recover genuine intraday flow timing.
 **Not yet consumed** by the backtest harness (§9) — that's a deliberately
 deferred follow-up once enough days accumulate.
+
+**Held-position contract coverage**: `{ticker}_option_contracts.json` is
+normally just `get_options_chain`'s raw ~50-contract response — which is
+*not* a guaranteed DTE window, despite how it usually looks; it's whatever
+UW's endpoint returns that day. A position held long enough can age its
+exact strike/expiry/type out of that response entirely, which silently
+breaks `should_exit()` in backtest replay: `get_option_premium()` returns
+`None` for that contract, and `StandardPolicy.should_exit()`'s early guard
+then skips *every* exit check that day — including thesis invalidation
+(§7), even though `current_setup` itself resolves correctly. `CaptureLoop`
+closes this by threading `PositionStore` in: any ticker with an open
+position is added to the day's capture universe ahead of the
+`max_tickers` cap, and if its exact contract isn't already in the raw
+chain response, a targeted `get_options_screener` call (narrow
+`min_dte`/`max_dte` bracketing the position's current DTE, full delta
+range) fetches it and merges the result in before writing the file. Only
+affects captures going forward — the 18-day corpus captured before this
+fix can't be backfilled (`get_options_chain`/`get_options_screener` are
+current-data-only, same limitation as flow alerts/darkpool above).
 
 | File | Written by | Cadence | Format |
 |---|---|---|---|

@@ -23,11 +23,19 @@
   container before writing the fix.
 - **Fix**: new `_is_unauthorized()` helper recurses into `exc.exceptions`
   (any nesting depth) instead of only checking the top-level `str(exc)`.
-  Duck-types via `getattr(exc, "exceptions", None)` rather than
+  Probed the live RH MCP endpoint directly with a deliberately invalid
+  token to see the real shape rather than assume one: the nested exception
+  is a genuine `httpx.HTTPStatusError` with a structured
+  `exc.response.status_code == 401` field — so that's the primary check
+  now, not string matching. A substring fallback (`"401"`/`"unauthorized"`
+  in the message) remains only for whatever isn't a plain
+  `HTTPStatusError`. Recursion duck-types via
+  `getattr(exc, "exceptions", None)` rather than
   `isinstance(exc, ExceptionGroup)` so the same code runs unmodified on
-  Python <3.11 too, where that builtin doesn't exist. Verified against the
-  literal production failure shape on the container's real Python 3.12
-  interpreter, not just locally.
+  Python <3.11 too, where that builtin doesn't exist. Verified the full
+  detection path — both the 401-matches and the 500-does-not-falsely-match
+  cases — against the container's real Python 3.12 interpreter, not just
+  locally.
 - Added `tests/unit/test_rh_mcp_config.py` — direct coverage of
   `_is_unauthorized()` (plain strings, nested exception groups, multiple
   sub-exceptions, arbitrary nesting depth) and `rh_call()`'s retry

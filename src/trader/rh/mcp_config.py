@@ -213,15 +213,23 @@ def _is_unauthorized(exc: BaseException) -> bool:
 
     On Python 3.11+, a failure inside MultiServerMCPClient's internal
     TaskGroup surfaces here as an ExceptionGroup whose own str() is the
-    generic "unhandled errors in a TaskGroup (1 sub-exception)" — the
-    actual "401 Unauthorized" text is one level down, in exc.exceptions.
-    A plain `"401" in str(exc)` check misses this entirely, which is how
-    RH auth silently stayed dead for weeks in production: every call
-    failed, got logged as a generic warning, and reload_rh_tools() never
-    fired. Duck-types via getattr(exc, "exceptions", None) instead of
+    generic "unhandled errors in a TaskGroup (1 sub-exception)" — the real
+    error is one level down, in exc.exceptions. Confirmed live against the
+    actual RH MCP endpoint with a deliberately invalid token: the nested
+    exception is httpx.HTTPStatusError with a genuine
+    exc.response.status_code == 401 — a structured field, not just text —
+    so that's the primary check. The substring fallback exists only for
+    whatever isn't a plain HTTPStatusError (e.g. an MCP protocol-level auth
+    error that never went through httpx's raise_for_status). Recursion
+    duck-types via getattr(exc, "exceptions", None) instead of
     isinstance(ExceptionGroup, ...) so this also runs unmodified on
-    Python <3.11, where that builtin doesn't exist.
+    Python <3.11, where that builtin doesn't exist. Without this recursion
+    at all, RH auth stayed silently dead for weeks in production — every
+    call failed, got logged as a generic warning, and reload_rh_tools()
+    never fired.
     """
+    if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 401:
+        return True
     text = str(exc).lower()
     if "401" in text or "unauthorized" in text:
         return True

@@ -208,6 +208,29 @@ def unwrap_mcp(result: object) -> object:
     return result
 
 
+def _is_unauthorized(exc: BaseException) -> bool:
+    """True if exc, or any exception nested inside it, indicates a 401.
+
+    On Python 3.11+, a failure inside MultiServerMCPClient's internal
+    TaskGroup surfaces here as an ExceptionGroup whose own str() is the
+    generic "unhandled errors in a TaskGroup (1 sub-exception)" — the
+    actual "401 Unauthorized" text is one level down, in exc.exceptions.
+    A plain `"401" in str(exc)` check misses this entirely, which is how
+    RH auth silently stayed dead for weeks in production: every call
+    failed, got logged as a generic warning, and reload_rh_tools() never
+    fired. Duck-types via getattr(exc, "exceptions", None) instead of
+    isinstance(ExceptionGroup, ...) so this also runs unmodified on
+    Python <3.11, where that builtin doesn't exist.
+    """
+    text = str(exc).lower()
+    if "401" in text or "unauthorized" in text:
+        return True
+    for sub in getattr(exc, "exceptions", None) or ():
+        if _is_unauthorized(sub):
+            return True
+    return False
+
+
 async def rh_call(rh_tools: dict[str, BaseTool], name: str, params: dict):
     """
     Call an RH MCP tool by name, retrying once after a token refresh on 401.
@@ -217,7 +240,7 @@ async def rh_call(rh_tools: dict[str, BaseTool], name: str, params: dict):
     try:
         return unwrap_mcp(await rh_tools[name].ainvoke(params))
     except Exception as exc:
-        if "401" in str(exc) or "unauthorized" in str(exc).lower():
+        if _is_unauthorized(exc):
             logger.warning("RH 401 on %s — refreshing token and retrying", name)
             await reload_rh_tools(rh_tools)
             return unwrap_mcp(await rh_tools[name].ainvoke(params))

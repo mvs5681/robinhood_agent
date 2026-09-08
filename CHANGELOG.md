@@ -1,5 +1,51 @@
 # Changelog
 
+## 2026-09-08 (fix silent RH auth death — 401 auto-refresh never actually fired)
+
+- **Found live, in production: RH connectivity had been dead for 19 days**
+  (since 2026-08-21) with zero visibility — no exits fired, no new
+  entries placed, two real open positions (`SPY` 780c, `BIDU` 100c, both
+  opened 2026-08-20) went completely unmonitored and are down 79%/72%,
+  both well past the strategy's own 35% stop-loss, with ~10 days left to
+  expiry. Confirmed directly against the live account via a separate MCP
+  session.
+- **Root cause**: `rh_call()`'s 401-detection (`src/trader/rh/mcp_config.py`)
+  only checked `"401" in str(exc)`. On Python 3.11+ (the container runs
+  3.12), a failure inside `MultiServerMCPClient`'s internal `TaskGroup`
+  surfaces as an `ExceptionGroup` whose own `str()` is the generic
+  `"unhandled errors in a TaskGroup (1 sub-exception)"` — the real `"401
+  Unauthorized"` text is nested one level down in `exc.exceptions`, never
+  in the top-level string. So the check never matched, `reload_rh_tools()`
+  never fired, and every RH call from the moment the access token expired
+  onward failed silently into a logged `WARNING` and an empty result —
+  `ExitLoop` saw "no prices," `Executor` saw failed order attempts, and
+  nothing ever recovered. Reproduced exactly inside the running production
+  container before writing the fix.
+- **Fix**: new `_is_unauthorized()` helper recurses into `exc.exceptions`
+  (any nesting depth) instead of only checking the top-level `str(exc)`.
+  Probed the live RH MCP endpoint directly with a deliberately invalid
+  token to see the real shape rather than assume one: the nested exception
+  is a genuine `httpx.HTTPStatusError` with a structured
+  `exc.response.status_code == 401` field — so that's the primary check
+  now, not string matching. A substring fallback (`"401"`/`"unauthorized"`
+  in the message) remains only for whatever isn't a plain
+  `HTTPStatusError`. Recursion duck-types via
+  `getattr(exc, "exceptions", None)` rather than
+  `isinstance(exc, ExceptionGroup)` so the same code runs unmodified on
+  Python <3.11 too, where that builtin doesn't exist. Verified the full
+  detection path — both the 401-matches and the 500-does-not-falsely-match
+  cases — against the container's real Python 3.12 interpreter, not just
+  locally.
+- Added `tests/unit/test_rh_mcp_config.py` — direct coverage of
+  `_is_unauthorized()` (plain strings, nested exception groups, multiple
+  sub-exceptions, arbitrary nesting depth) and `rh_call()`'s retry
+  behavior, including the exact `TaskGroup`-wrapped shape that caused the
+  incident.
+- This does not by itself resolve the two stranded positions or confirm
+  the stored refresh token is still valid after 19 days of undetected
+  staleness — both need explicit, deliberate handling before/while
+  redeploying, not an unattended restart.
+
 ## 2026-08-15 (capture intraday flow alerts — start collecting real timing)
 
 - **New `FlowAlertCapture`** (`src/trader/live/flow_capture.py`), piggybacked
